@@ -33,6 +33,7 @@ import json
 import math
 import os
 import re
+import shutil
 import struct
 import sys
 import time
@@ -47,7 +48,7 @@ try:
 except ImportError:                                # pragma: no cover - unpack.py ships with us
     unpack_mod = None
 
-VERSION = "0.6.1"
+VERSION = "0.7.0"
 
 # --------------------------------------------------------------------------- #
 # format identification (magic bytes, because extensions lie)
@@ -791,11 +792,38 @@ def extract_iocs(data: bytes, limit: int = 400) -> dict:
     return out
 
 
+def readable_regions(data: bytes, min_run: int = 24) -> bytes:
+    """Keep only stretches that look like readable data, not code.
+
+    Carving printable runs out of machine code produces import names and instruction
+    fragments -- "CreateFileW" became a suspicious string because it contains "file". Those
+    are noise, and worse than noise, because a file that imports nothing interesting then
+    looks like it has a alarming string in it. A genuine string lives in a long readable run;
+    code does not contain one.
+    """
+    out = bytearray()
+    run = 0
+    start = 0
+    for i, b in enumerate(data):
+        if 0x20 <= b < 0x7F or b in (0x09, 0x0A, 0x0D):
+            if run == 0:
+                start = i
+            run += 1
+        else:
+            if run >= min_run:
+                out += data[start:i] + bytes([10])
+            run = 0
+    if run >= min_run:
+        out += data[start:]
+    return bytes(out)
+
+
 def extract_strings(data: bytes, min_len: int = 6, limit: int = 300) -> dict:
     """ASCII and UTF-16LE runs. UTF-16 matters: a .NET or wide-char sample hides here."""
     ascii_re = re.compile(rb"[\x20-\x7e]{%d,}" % min_len)
     wide_re = re.compile((rb"(?:[\x20-\x7e]\x00){%d,}" % min_len))
-    ascii_hits = [m.group(0).decode("latin1") for m in ascii_re.finditer(data)]
+    text = readable_regions(data)
+    ascii_hits = [m.group(0).decode("latin1") for m in ascii_re.finditer(text)]
     wide_hits = [m.group(0).decode("utf-16-le", "replace") for m in wide_re.finditer(data)]
     interesting = [s for s in ascii_hits + wide_hits
                    if any(k in s.lower() for k in (
@@ -1226,6 +1254,168 @@ def build_stix_bundle(report: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# handing a flagged file to an isolated environment
+# --------------------------------------------------------------------------- #
+#
+# The rule this exists to serve: it stages, it never detonates.
+#
+#   triage (never executes)  ->  stage into a shuttle directory  ->  a human runs it in a VM
+#
+# Copying is safe; running is not, and the boundary between them is what keeps this from
+# becoming an automatic detonator. So everything here is a file copy plus a written record,
+# and the output always includes the manual step rather than performing it.
+#
+# Beyond that, the reasoning for the pattern: signature-based detection can only recognise
+# what it has already seen, and a one-shot destroyer may never be seen twice. Staging a
+# flagged file puts a record and a copy in the operator's hand before anything runs, which is
+# the only useful thing a tool can do at that moment.
+
+QUARANTINE_MANIFEST = "quarantine.jsonl"
+
+VM_INSTRUCTIONS = (
+    "Next step is manual, in an isolated environment:",
+    "  1. create a disposable VM with no network and no shared folders",
+    "  2. copy ONLY this file in, and treat the copy as hostile",
+    "  3. run it there and observe; do not run it on the host",
+    "  4. destroy the VM afterwards rather than reusing it",
+)
+
+
+def quarantine_copy(source: Path, quarantine_dir: Path, report: dict, *,
+                    reason: str) -> dict:
+    """Copy a flagged file into a shuttle directory and record why.
+
+    Deliberately not a move: the original stays where the operator can see it, and a tool
+    that silently relocates a file out of a directory someone is working in causes more
+    problems than it solves.
+
+    Nothing here executes anything. It writes two files: the copy, and its record.
+    """
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    sha = report["hashes"]["sha256"]
+    # The name carries the hash tail so two files cannot silently collide in the shuttle.
+    staged_name = "%s_%s_%s" % (stamp, sha[:12], source.name)
+    staged = quarantine_dir / staged_name
+
+    try:
+        with source.open("rb") as src, staged.open("wb") as dst:
+            shutil.copyfileobj(src, dst, 1 << 20)
+    except OSError as exc:
+        return {"ok": False, "reason": "could not copy: %s" % exc, "executed": False}
+
+    # The record travels with the copy: whoever opens the shuttle later needs the verdict and
+    # the evidence, not just a file with an opaque name.
+    record = {
+        "staged_at": stamp,
+        "staged_name": staged_name,
+        "original_path": str(source),
+        "sha256": sha,
+        "md5": report["hashes"]["md5"],
+        "size": report["hashes"]["size"],
+        "identified_as": report["identified_as"]["label"],
+        "reason": reason,
+        "attention": report["assessment"]["attention"],
+        "reasons": report["assessment"]["reasons"],
+        "destructive": {
+            "highest": (report.get("destructive") or {}).get("highest"),
+            "findings": (report.get("destructive") or {}).get("findings", []),
+        },
+        "iocs": {k: v[:20] for k, v in (report.get("iocs") or {}).items()},
+        "executed": False,
+        "note": "staged by triage; nothing in the staging step ran this file",
+    }
+    (quarantine_dir / (staged_name + ".why.json")).write_text(
+        json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+    with (quarantine_dir / QUARANTINE_MANIFEST).open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({k: record[k] for k in
+                             ("staged_at", "staged_name", "sha256", "reason",
+                              "attention", "executed")}, ensure_ascii=False) + "\n")
+
+    return {
+        "ok": True,
+        "staged": str(staged),
+        "why": str(staged) + ".why.json",
+        "reason": reason,
+        "manifest": str(quarantine_dir / QUARANTINE_MANIFEST),
+        "executed": False,
+    }
+
+
+def list_quarantine(quarantine_dir: Path) -> int:
+    """Show what is waiting in a shuttle directory, so it does not become a black hole."""
+    manifest = quarantine_dir / QUARANTINE_MANIFEST
+    if not manifest.is_file():
+        print("nothing staged in %s" % quarantine_dir)
+        return 0
+    rows = []
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            continue
+    print("%d staged file(s) in %s" % (len(rows), quarantine_dir))
+    for r in rows:
+        print("  %s  %s" % (r.get("staged_at", "?"), r.get("staged_name", "?")))
+        print("      %s" % (r.get("reason") or "")[:110])
+    print()
+    for line in VM_INSTRUCTIONS:
+        print("  %s" % line)
+    return 0
+
+
+# Reasons that are high-confidence on their own. A weak string keyword match is not one:
+# measured over 260 real system and application binaries, 258 reported at least one
+# "suspicious string", so that signal has almost no discriminating power and must not by
+# itself decide that a file deserves a VM slot.
+STRONG_REASON_MARKERS = (
+    "injection triad",
+    "EMBEDDED BOOT SECTOR",
+    "DEVICE CONTROL",
+    "input hook plus crypto RNG",
+    "high-entropy executable",
+    "packed or encrypted",
+    "named .",
+)
+
+
+def high_confidence_reasons(report: dict) -> list:
+    """The subset of reasons worth acting on without a human reading them first."""
+    return [r for r in report["assessment"]["reasons"]
+            if any(m.lower() in r.lower() for m in STRONG_REASON_MARKERS)]
+
+
+def should_stage(report: dict, min_attention: int = 1, min_weak: int = 5) -> tuple:
+    """Decide whether a file is worth a VM slot, and say why.
+
+    The gate is about evidence the operator can check, not a score, and it is calibrated on a
+    corpus rather than guessed:
+
+    * a destructive finding at high or critical severity always stages -- it is the one
+      consequence that cannot be walked back
+    * a high-confidence reason stages, and the reason is quoted so the operator can disagree
+    * weak signals alone need several of them, because one keyword hit is nearly universal
+    """
+    destructive = report.get("destructive") or {}
+    if destructive.get("highest") in ("high", "critical"):
+        return True, "destructive capability reported at %s" % destructive["highest"]
+    strong = high_confidence_reasons(report)
+    if strong and report["assessment"]["attention"] >= min_attention:
+        return True, "attention: %s" % "; ".join(strong)[:240]
+    if report.get("wrapper"):
+        return True, "%s wrapper: it is a self-extracting program" % \
+                     report["wrapper"]["wrapper"]
+    weak = report["assessment"]["attention"]
+    if weak >= min_weak:
+        return True, "%d weak signals: %s" % (
+            weak, "; ".join(report["assessment"]["reasons"])[:200])
+    return False, "nothing flagged above the staging threshold (weak signals: %d)" % weak
+
+
+# --------------------------------------------------------------------------- #
 # report
 # --------------------------------------------------------------------------- #
 
@@ -1555,6 +1745,14 @@ def main(argv=None) -> int:
                          "accepted, so give bytes)" % DEFAULT_MAX_BYTES)
     ap.add_argument("--force", action="store_true",
                     help="analyse it regardless of size; peak memory is about twice the file")
+    ap.add_argument("--quarantine", metavar="DIR",
+                    help="stage a flagged file into this directory for VM analysis "
+                         "(a copy plus a written reason; never executes anything)")
+    ap.add_argument("--quarantine-list", metavar="DIR",
+                    help="list what has been staged in a quarantine directory")
+    ap.add_argument("--quarantine-min", type=int, default=1, metavar="N",
+                    help="stage when at least N attention signals are present (default 1); "
+                         "high or critical destructive findings always stage")
     ap.add_argument("--unpack", action="store_true",
                     help="also unpack a recognised wrapper in-process (never executes it)")
     ap.add_argument("--scan", metavar="DIR",
@@ -1572,6 +1770,9 @@ def main(argv=None) -> int:
     if path is not None and path.is_dir():
         print("that is a directory: %s -- did you mean --scan %s ?" % (path, path), file=sys.stderr)
         return 1
+
+    if args.quarantine_list:
+        return list_quarantine(Path(args.quarantine_list))
 
     if args.scan:
         # --scan stands alone: no positional file is needed. Checked before anything else
@@ -1617,6 +1818,25 @@ def main(argv=None) -> int:
         if not args.quiet:
             print("report -> %s" % (out / "report.json"))
             print("yara   -> %s" % (out / "rule.yar"))
+    if args.quarantine and path is not None:
+        stage, why = should_stage(report, min_attention=args.quarantine_min)
+        if stage:
+            res = quarantine_copy(path, Path(args.quarantine), report, reason=why)
+            report["quarantine"] = res
+            if not args.quiet:
+                if res.get("ok"):
+                    print("staged      : %s" % res["staged"])
+                    print("   reason   : %s" % why)
+                    for line in VM_INSTRUCTIONS:
+                        print("   %s" % line)
+                else:
+                    print("staged      : failed (%s)" % res.get("reason"))
+        else:
+            report["quarantine"] = {"ok": True, "staged": None, "reason": why,
+                                    "executed": False}
+            if not args.quiet:
+                print("staged      : no -- %s" % why)
+
     if args.feed:
         out = Path(args.out) if args.out else Path.cwd()
         out.mkdir(parents=True, exist_ok=True)

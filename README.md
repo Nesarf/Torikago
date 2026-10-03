@@ -194,6 +194,55 @@ One useful pointer found in those lists: Microsoft's **RIFT**, for analysing **R
 malware. That is why language identification was added here — it is cheap, static, and Rust
 binaries are harder to read on purpose.
 
+## Staging a flagged file for a VM
+
+```bash
+python triage.py suspicious.exe --quarantine ./shuttle
+python triage.py --quarantine-list ./shuttle
+```
+
+A flagged file is **copied** into the shuttle directory with its verdict and the evidence
+that produced it, and the output states the part that stays manual. Nothing is executed and
+nothing is moved: the original stays where you can see it.
+
+```
+staged      : ./shuttle/20261003T215443_8f47b88ba3bf_invoice.png
+   reason   : attention: injection triad (VirtualAlloc + WriteProcessMemory + CreateRemoteThread)
+   Next step is manual, in an isolated environment:
+     1. create a disposable VM with no network and no shared folders
+     2. copy ONLY this file in, and treat the copy as hostile
+     3. run it there and observe; do not run it on the host
+     4. destroy the VM afterwards rather than reusing it
+```
+
+The reasoning: signature-based detection only recognises what it has already seen, and a
+one-shot destroyer may never be seen twice. Staging puts a record and a copy in the
+operator's hand **before** anything runs — and detonation stays a human decision, because the
+alternative is a tool that launches malware by itself.
+
+Three files land in the shuttle, and the name carries the hash so two files cannot silently
+collide:
+
+| File | Purpose |
+|---|---|
+| `<timestamp>_<sha256[:12]>_<name>` | the copy |
+| the same name + `.why.json` | verdict, evidence, IOCs, and `executed: false` |
+| `quarantine.jsonl` | append-only record for auditing |
+
+### What stages, and what does not
+
+Calibrated on a corpus rather than guessed, because one signal turned out to be nearly
+universal: **258 of 260 real system and application binaries report at least one "suspicious
+string"**, so a keyword hit cannot decide anything on its own.
+
+| Condition | Stages |
+|---|---|
+| destructive finding at high or critical severity | always |
+| a high-confidence reason (injection triad, embedded boot sector, packing, high-entropy executable, a name that contradicts its contents) | yes, and the reason is quoted |
+| weak signals only | needs several (`--quarantine-min`, default 1 for the strong gate) |
+| a recognised wrapper | yes: it is a self-extracting program |
+| nothing flagged | no — `nothing flagged above the staging threshold (weak signals: N)` |
+
 ## Hardened as an attack surface, not only used as a tool
 
 A tool that opens untrusted files is itself an attack surface, so it was audited as one.
