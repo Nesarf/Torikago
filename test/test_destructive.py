@@ -172,5 +172,49 @@ class TestBootSectorNotMisread(unittest.TestCase):
         self.assertEqual(r["destructive"]["count"], 0)
 
 
+class TestMemzImportPattern(unittest.TestCase):
+    """The real sample's import table, which disproved the rule that was written first.
+
+    Memz wipes the master boot record, and its imports contain neither DeviceIoControl nor
+    WriteFile: those are resolved at runtime through the export table, so they never appear
+    as imports. A rule built on them was aimed at the wrong evidence -- it flagged five
+    benign binaries out of seven and would still have missed the real thing.
+
+    What the sample does import is the pattern below, taken from the actual binary
+    (MEMZ-Clean.exe, compiled 2016-07-10): an input hook, a crypto RNG, a launcher and sound,
+    with no disk write anywhere.
+    """
+
+    def test_real_memz_import_pattern_is_flagged(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "sample.exe"
+            p.write_bytes(tt.build_pe(imports=[
+                ("KERNEL32.dll", ["Sleep", "CreateThread", "GlobalAlloc"]),
+                ("USER32.dll", ["SetWindowsHookExW", "SendInput", "SetCursorPos",
+                                "EnumWindows"]),
+                ("ADVAPI32.dll", ["CryptGenRandom", "CryptAcquireContextW"]),
+                ("SHELL32.dll", ["ShellExecuteA"]),
+                ("WINMM.dll", ["PlaySoundA"]),
+            ]))
+            r = tri.build_report(p, None)
+        caps = [f["capability"] for f in r["destructive"]["findings"]]
+        self.assertIn("input hook plus crypto RNG without any disk write", caps)
+
+    def test_a_hook_alone_is_not_enough(self):
+        """Requiring the second ingredient is what keeps this off ordinary software."""
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "hooker.dll"
+            p.write_bytes(tt.build_pe(imports=[("USER32.dll", ["SetWindowsHookExW"])]))
+            r = tri.build_report(p, None)
+        self.assertEqual(r["destructive"]["count"], 0)
+
+    def test_crypto_alone_is_not_enough(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "rand.dll"
+            p.write_bytes(tt.build_pe(imports=[("ADVAPI32.dll", ["CryptGenRandom"])]))
+            r = tri.build_report(p, None)
+        self.assertEqual(r["destructive"]["count"], 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

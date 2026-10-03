@@ -47,7 +47,7 @@ try:
 except ImportError:                                # pragma: no cover - unpack.py ships with us
     unpack_mod = None
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 # --------------------------------------------------------------------------- #
 # format identification (magic bytes, because extensions lie)
@@ -333,11 +333,22 @@ def detect_destructive(pe: dict | None, data: bytes, imports: list,
 
     # DeviceIoControl and WriteFile are not evidence of anything: both are ordinary imports
     # in most Windows binaries (kernel32.dll and shell32.dll import them, and so does every
-    # archiver). The pair was tried as a rule and flagged five benign binaries out of seven,
-    # so destructiveness is judged on structural evidence only:
-    #   - a boot sector, verified against the partition-table format
-    #   - a raw device path, recorded as moderate rather than high
-    #   - terminology, recorded as low
+    # archiver). The pair was tried as a rule and flagged five benign binaries out of seven.
+    #
+    # Then a real MBR overwriter was checked against this code, and its import table contains
+    # NEITHER of them: the disk APIs are resolved at runtime through the PE export table, so
+    # they never appear as imports at all. The rule was not merely noisy, it was aimed at the
+    # wrong evidence. What the real sample imports is a different and more honest signal:
+    # an input hook, a screen grabber, a crypto RNG and a launcher, with no disk write
+    # anywhere -- a program that is busy with the machine while showing nothing on it.
+    if {"setwindowshookexw", "setwindowshookexa"} & all_funcs             and "cryptgenrandom" in all_funcs:
+        findings.append({
+            "capability": "input hook plus crypto RNG without any disk write",
+            "evidence": "SetWindowsHookEx with CryptGenRandom, and no write-to-disk import: "
+                        "consistent with a program whose effect is on the desktop and whose "
+                        "payload is fetched or generated at runtime",
+            "severity": "medium",
+        })
     # Word-boundary matching: a plain substring test flagged a Python extension module
     # because unicode character data contains "UMBRELLA", which contains "MBR".
     interesting = " ".join(strings.get("interesting", [])).lower()
