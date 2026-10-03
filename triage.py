@@ -974,11 +974,20 @@ def assess(pe: dict | None, packer: dict, strings: dict, iocs: dict,
                 api_hits.append(fn)
                 if key in STRONG_SIGNAL_IMPORTS:
                     strong.append(fn)
+    # The injection triad is judged first, and on the full import set: it is the single most
+    # meaningful import signal there is, and it must fire in single-file triage too, not only
+    # in batch scan mode. Escalating on the combination rather than on any one API is what
+    # keeps ordinary software -- which uses VirtualAlloc and GetProcAddress constantly --
+    # out of the report.
+    low = {fn.lower() for fn in api_hits}
+    if {"virtualalloc", "writeprocessmemory", "createremotethread"} <= low:
+        reasons.append("injection triad (VirtualAlloc + WriteProcessMemory + CreateRemoteThread)")
     context = (packer["verdict"] not in ("none", "n/a")) or bool(embedded)
     if strong and context:
         reasons.append("notable imports in a packed or embedded-image file: "
                        + ", ".join(sorted(set(strong))[:8]))
-    elif api_hits:
+    elif api_hits and not {"virtualalloc", "writeprocessmemory",
+                           "createremotethread"} <= low:
         reasons.append("uses APIs worth noting, though common in ordinary programs: "
                        + ", ".join(sorted(set(api_hits))[:6]))
     for kind in ("url", "registry_run", "scheduled_task", "defender_exclusion", "named_pipe"):

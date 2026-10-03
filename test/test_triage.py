@@ -256,6 +256,27 @@ class TestPeAnalysis(unittest.TestCase):
         self.assertGreater(r["embedded_executables"][0]["offset"], 0)
 
 
+class TestInjectionTriad(unittest.TestCase):
+    """The triad must fire in single-file triage, not only in batch scan mode."""
+
+    def test_triad_is_reported_for_a_single_file(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "svchost.exe"
+            p.write_bytes(build_pe(imports=[("KERNEL32.dll", [
+                "VirtualAlloc", "WriteProcessMemory", "CreateRemoteThread"])]))
+            r = tri.build_report(p, None)
+        joined = " ".join(r["assessment"]["reasons"])
+        self.assertIn("injection triad", joined)
+
+    def test_virtualalloc_alone_is_not_the_triad(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "jit.dll"
+            p.write_bytes(build_pe(imports=[("KERNEL32.dll", ["VirtualAlloc"])]))
+            r = tri.build_report(p, None)
+        joined = " ".join(r["assessment"]["reasons"])
+        self.assertNotIn("injection triad", joined)
+
+
 class TestWrappers(unittest.TestCase):
     def _pyinstaller(self) -> bytes:
         pkg_len, toc_len = 500, 64
