@@ -38,6 +38,7 @@ Three things this tool therefore does **not** claim:
 | **PE structure** | machine, section table, per-section entropy, writable/executable flags, data directories (a TLS callback runs before the entry point and is called out). |
 | **Imports** | full import table with per-DLL function lists. Dynamic resolution, injection and anti-debug APIs are flagged, and their weight is stated honestly: on their own they are ordinary program behaviour. |
 | **Packer** | UPX (section pair and marker scan), Themida, VMProtect, ASPack, MPRESS, PECompact and friends, plus generic evidence (all sections high-entropy, a near-empty import table). |
+| **Language runtime** | Names what built it: Rust (rustc markers), Go (build ID, runtime symbols), C#/.NET (decided structurally — COM descriptor → CLI header → `BSJB` metadata root, not by scanning for a four-byte signature), AutoIt, Delphi, Nim, Electron/Node, frozen Python. A Rust or Go binary whose symbols are gone is flagged, because stripping is normal and also removes the analyst's best tool. |
 | **Wrappers** | PyInstaller cookies are read properly (python version, library, PYZ presence) and routed to `nanodesu.py` for unpacking. NSIS, Inno Setup, InstallShield, AutoIt, Nuitka and others are named, not pretended. |
 | **Indicators** | URLs, IPs, domains, mail addresses, registry `Run` keys, services, scheduled tasks, PowerShell/cmd lines, named pipes, Defender exclusions. Documentation hosts and RFC1918 ranges are filtered; a version string like `6.0.0.0` is deliberately kept, because a false positive you can see beats one hidden from you. |
 | **Strings** | ASCII and UTF-16LE (wide strings matter: a .NET or wide-char sample hides there), plus base64 blobs with their decoded heads, flagged when they decode to a PE. |
@@ -151,7 +152,7 @@ trojan carrying the injection triad and a misnamed extension. Both directions ar
 python -m unittest discover -s test -v
 ```
 
-59 tests, no samples required: every fixture is a small synthetic file, including a
+69 tests, no samples required: every fixture is a small synthetic file, including a
 hand-assembled PE. A suite that needs real malware is a suite that stops being run.
 
 The PE parser is additionally validated against real binaries, which is the baseline that
@@ -165,6 +166,33 @@ functions, `advapi32.dll` → 35 / 656, `shell32.dll` → 79 / 1087.
 * `7zr.exe`, `winmm.dll`, `kernel32.dll`, `advapi32.dll`, `shell32.dll` — structure and
   import tables parsed, `packer: none` for unpacked binaries (no false packer verdicts).
 * A `.png`-named PE — the naming contradiction is reported.
+
+## Where this sits, and where it does not
+
+Several curated "top open-source security tools" lists were reviewed while building this
+(secrss, eet-china, Tencent Cloud, Pa55w0rd/Enterprise_-Security_tools, and others). Across
+all of them, **one tool does the same job and it works the opposite way**: Cuckoo Sandbox
+("constructs an isolated environment to *run* the malware and generates a behaviour log").
+Everything else in the malware-adjacent categories is host-side or network-side detection —
+Wazuh, OSSEC, whids, yulong-hids, Maltrail, Falco.
+
+That is not a gap in those lists, it is the shape of the field:
+
+```
+unknown file
+  -> [static]   triage + Nanodesu! unpack      <- never executes; this tool
+  -> [dynamic]  Cuckoo / CAPEv2 detonation     <- executes, in isolation
+  -> [verdict]  ClamAV / YARA / reputation
+  -> [intel]    MISP / Maltrail
+```
+
+This tool is the stage *before* detonation: see what is inside safely, then decide whether
+it is worth a sandbox slot. It deliberately does **not** become a sandbox, because that
+requires running the sample, which is the one thing it will not do.
+
+One useful pointer found in those lists: Microsoft's **RIFT**, for analysing **Rust**
+malware. That is why language identification was added here — it is cheap, static, and Rust
+binaries are harder to read on purpose.
 
 ## What was deliberately left out
 

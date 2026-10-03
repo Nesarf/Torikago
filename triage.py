@@ -47,7 +47,7 @@ try:
 except ImportError:                                # pragma: no cover - unpack.py ships with us
     unpack_mod = None
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 # --------------------------------------------------------------------------- #
 # format identification (magic bytes, because extensions lie)
@@ -399,6 +399,109 @@ def detect_pyinstaller(data: bytes) -> dict | None:
         "toc_entries_length": toc_len,
         "has_pyz": data.rfind(PYZ_MAGIC) > 0,
         "note": "unpack with nanodesu.py (extract / verify / pyz); no execution needed",
+    }
+
+
+# Language runtimes that are worth naming, because language changes how a binary must be
+# analysed. Rust in particular is on the rise in malware precisely because its binaries are
+# harder to read: symbols are mangled, the runtime is large, and strings are scattered.
+# All of this is detectable statically, without running anything.
+RUNTIME_MARKERS = (
+    ("Rust", (
+        b"rustc", b"core::panicking", b"RUST_BACKTRACE", b"/rustc/", b"library/std/src",
+        b"rust_begin_unwind", b"__rust_alloc", b".rustc",
+    )),
+    ("Go", (
+        b"Go build ID", b"go1.", b"runtime.gopanic", b"golang.org/", b"go.buildid",
+        b"runtime.main", b"GOROOT",
+    )),
+    # .NET is decided structurally, by the COM descriptor directory, not by this table.
+    # Scanning for a four-byte marker produced false positives on ordinary Win32 libraries.
+    ("AutoIt", (b"AutoIt", b"AU3!EA06")),
+    ("Python-frozen", (b"_MEIPASS", b"PyInstaller", b"PYZ" + bytes(1), b"pyi-")),
+    ("Delphi/Pascal", (b"Borland", b"Embarcadero", b"System.pas")),
+    ("Nim", (b"NimMain", b"nimFrame", b"nim_program_result")),
+    ("Electron/Node", (b"node.exe", b"electron", b"v8::internal")),
+)
+
+
+def is_dotnet(pe: dict | None, data: bytes) -> dict | None:
+    """Decide .NET structurally: the COM descriptor directory must point at CLR metadata.
+
+    Not by scanning for the four-byte BSJB signature -- that appears by chance inside large
+    Win32 binaries, and keying on it reported kernel32.dll as .NET. The metadata root is
+    supposed to start with BSJB followed by a plausible header length, and it is supposed to
+    be where the directory says it is.
+    """
+    if not pe:
+        return None
+    d = (pe.get("directories") or {}).get("com_descriptor")
+    if not d:
+        return None
+    # The COM descriptor points at the CLI header, not at the metadata. Verified against a
+    # real assembly: CLI header at the directory RVA (cb=72, runtime 2.5), whose +8 field is
+    # the metadata RVA, whose target begins with BSJB. Skipping this hop is why a genuine
+    # .NET build was not recognised while a chance BSJB in kernel32.dll was.
+    cli_off = rva_to_offset(pe, d["rva"])
+    if cli_off is None or cli_off + 16 > len(data):
+        return None
+    try:
+        cb, runtime_major, runtime_minor = struct.unpack_from("<IHH", data, cli_off)
+        md_rva, _md_size = struct.unpack_from("<II", data, cli_off + 8)
+    except struct.error:
+        return None
+    if not (0 < cb <= 256) or not md_rva:
+        return None
+    md_off = rva_to_offset(pe, md_rva)
+    if md_off is None or md_off + 20 > len(data):
+        return None
+    if data[md_off:md_off + 4] != b"BSJB":
+        return None
+    try:
+        meta_major, meta_minor = struct.unpack_from("<HH", data, md_off + 4)
+        version_len = struct.unpack_from("<I", data, md_off + 12)[0]
+    except struct.error:
+        return None
+    if not (0 < version_len <= 256):
+        return None
+    version = data[md_off + 16:md_off + 16 + version_len].split(bytes(1), 1)[0]
+    version_text = version.decode("latin1", "replace").strip() or "unknown"
+    return {"language": "C#/.NET",
+            "markers": ["COM descriptor -> CLI header -> BSJB",
+                        "runtime %d.%d" % (runtime_major, runtime_minor),
+                        "metadata %s" % version_text],
+            "count": 3}
+
+
+
+def detect_language(data: bytes, limit: int = 6 << 20, pe: dict | None = None) -> dict:
+    """Name the language runtime when the evidence is there.
+
+    This is a pointer for the analyst, not a claim: "Rust" says the binary was built with
+    rustc, which changes which tooling is worth reaching for.
+    """
+    head = data[:limit]
+    hits = []
+    for lang, markers in RUNTIME_MARKERS:
+        found = [m.decode("latin1", "replace") for m in markers if m in head]
+        if not found:
+            continue
+        # A single weak reference is not identification. .NET in particular needs its
+        # metadata signature, not just a mention of the CLR shim.
+
+        hits.append({"language": lang, "markers": found[:6], "count": len(found)})
+    net = is_dotnet(pe, data)
+    if net:
+        hits.append(net)
+    hits.sort(key=lambda h: -h["count"])
+    return {
+        "likely": hits[0]["language"] if hits else None,
+        "all": hits,
+        # A Rust or Go binary with no symbol names left is worth flagging: stripping is
+        # normal, but it also removes the analyst's best tool.
+        "symbols_stripped_hint": bool(
+            hits and hits[0]["language"] in ("Rust", "Go")
+            and b"rust_begin_unwind" not in head and b"runtime.main" not in head),
     }
 
 
@@ -1056,6 +1159,7 @@ def build_report(path: Path, out_dir: Path | None) -> dict:
         "packer": packer,
         "wrapper": pyinstaller,
         "other_wrapper_markers": wrappers,
+        "language": detect_language(data, pe=pe),
         "embedded_executables": embedded,
         "iocs": iocs,
         "strings": strings,
@@ -1161,6 +1265,11 @@ def print_human(report: dict) -> None:
         w = report["wrapper"]
         print("wrapper     : PyInstaller (python %s, %s)"
               % (w["python_version"], w["python_library"]))
+    if report.get("language", {}).get("likely"):
+        lang = report["language"]
+        print("language    : %s (%s)%s" % (
+            lang["likely"], ", ".join(lang["all"][0]["markers"][:3]),
+            " -- symbols appear stripped" if lang["symbols_stripped_hint"] else ""))
     if report["other_wrapper_markers"]:
         print("markers     : %s" % ", ".join(report["other_wrapper_markers"]))
     if report["packer"]["verdict"] not in ("n/a",):
