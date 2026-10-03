@@ -47,7 +47,7 @@ try:
 except ImportError:                                # pragma: no cover - unpack.py ships with us
     unpack_mod = None
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 # --------------------------------------------------------------------------- #
 # format identification (magic bytes, because extensions lie)
@@ -843,6 +843,11 @@ def base64_candidates(strings: dict, limit: int = 25) -> list:
 
 # --- inside-peek: triage the files a wrapper produced, without loading them whole ---- #
 
+# Analysis limit for a single file. The whole file is loaded, so the guard is set where a
+# normal analysis host has room: peak memory is roughly twice this. Tunable, with an explicit
+# override for the case where the caller really does mean it.
+DEFAULT_MAX_BYTES = 768 << 20
+
 PEEK_BYTES = 4 << 20          # 4 MB of each inner file is enough to type it and read its PE header
 
 
@@ -1319,7 +1324,20 @@ def draft_yara(report: dict, max_strings: int = 8) -> str:
                                 strings="\n".join(lines), condition=" and ".join(conds))
 
 
-def build_report(path: Path, out_dir: Path | None) -> dict:
+def build_report(path: Path, out_dir: Path | None, *, max_bytes: int = DEFAULT_MAX_BYTES,
+                 force: bool = False) -> dict:
+    # The whole file is loaded, because hashes, strings and indicators need all of it, and
+    # peak memory measures at about twice the file size: a 300 MB file cost 600 MB and 62
+    # seconds. The cost is linear, so an arbitrarily large input is a cheap way to hang an
+    # analysis machine. Refuse by default rather than assuming the caller meant it.
+    size = path.stat().st_size
+    if not force and max_bytes and size > max_bytes:
+        raise SystemExit(
+            "%s is %.1f MB, above the %.1f MB analysis limit.\n"
+            "  Resource guard, not a refusal to analyse: the whole file is loaded and peak\n"
+            "  memory runs about twice its size. Raise it with --max-bytes N, or override\n"
+            "  entirely with --force."
+            % (path.name, size / (1 << 20), max_bytes / (1 << 20)))
     data = path.read_bytes()
     kind = identify(data, path)
     pe = parse_pe(data) if kind["kind"] == "pe" else None
@@ -1359,9 +1377,10 @@ def build_report(path: Path, out_dir: Path | None) -> dict:
     return report
 
 
-def build_report_with_unpack(path: Path, out_dir: Path | None, unpack: bool) -> dict:
+def build_report_with_unpack(path: Path, out_dir: Path | None, unpack: bool, *,
+                             max_bytes: int = DEFAULT_MAX_BYTES, force: bool = False) -> dict:
     """A report, optionally extended with what an actual unpack found inside."""
-    report = build_report(path, out_dir)
+    report = build_report(path, out_dir, max_bytes=max_bytes, force=force)
     if not unpack:
         return report                       # not asked for: say nothing rather than "failed"
     if unpack_mod is None:
@@ -1520,6 +1539,11 @@ def main(argv=None) -> int:
     ap.add_argument("-o", "--out", help="directory for report.json and rule.yar")
     ap.add_argument("--json", action="store_true", help="print JSON instead of a summary")
     ap.add_argument("--quiet", action="store_true", help="write files only")
+    ap.add_argument("--max-bytes", type=float, default=DEFAULT_MAX_BYTES,
+                    help="refuse to analyse a file larger than this (default %d; suffix not "
+                         "accepted, so give bytes)" % DEFAULT_MAX_BYTES)
+    ap.add_argument("--force", action="store_true",
+                    help="analyse it regardless of size; peak memory is about twice the file")
     ap.add_argument("--unpack", action="store_true",
                     help="also unpack a recognised wrapper in-process (never executes it)")
     ap.add_argument("--scan", metavar="DIR",
@@ -1563,7 +1587,8 @@ def main(argv=None) -> int:
         print("give me a file to inspect, or --scan DIR for a whole directory", file=sys.stderr)
         return 2
 
-    report = build_report_with_unpack(path, Path(args.out) if args.out else None, args.unpack)
+    report = build_report_with_unpack(path, Path(args.out) if args.out else None, args.unpack,
+                                      max_bytes=int(args.max_bytes), force=args.force)
 
     if args.scan_av:
         targets = [path]

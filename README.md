@@ -194,6 +194,22 @@ One useful pointer found in those lists: Microsoft's **RIFT**, for analysing **R
 malware. That is why language identification was added here — it is cheap, static, and Rust
 binaries are harder to read on purpose.
 
+## Hardened as an attack surface, not only used as a tool
+
+A tool that opens untrusted files is itself an attack surface, so it was audited as one.
+
+| Area | State |
+|---|---|
+| **Never executes the target** | no `CreateProcess` anywhere, and no flag that adds one |
+| **Resource bounds** | a single analysis loads the whole file, so a size guard refuses anything above **768 MB** by default (peak memory runs about twice the file size — a 300 MB file measured 600 MB and 62 seconds). `--max-bytes` raises it, `--force` overrides it, both explicit. Inside a directory scan only the first **4 MB** of each file is read. |
+| **Subprocess** | ClamAV is invoked as an argument list, never through a shell. It is the only subprocess in the tool. |
+| **Integration output** | the MISP event and STIX bundle embed attacker-controlled strings and are emitted through the standard serialisers, not by string concatenation |
+| **Paths** | output paths come from the tool's own control, never from a name inside a sample — the one place a sample's names become paths is the unpack step, delegated to Nanodesu, where a path traversal bug was found and fixed in 1.1.0 |
+| **Supply chain** | no third-party dependencies, no network access, CI actions pinned to commit SHAs, read-only CI token |
+
+`SECURITY.md` states all of this, including what the tool explicitly does **not** defend
+against, and private vulnerability reporting is enabled on the repository.
+
 ## What was deliberately left out
 
 * **Unpacking runtime packers.** Needs execution.
