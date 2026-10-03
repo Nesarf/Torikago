@@ -35,6 +35,8 @@ import os
 import re
 import struct
 import sys
+import time
+import uuid
 import zlib
 from collections import Counter
 from pathlib import Path
@@ -45,7 +47,7 @@ try:
 except ImportError:                                # pragma: no cover - unpack.py ships with us
     unpack_mod = None
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # --------------------------------------------------------------------------- #
 # format identification (magic bytes, because extensions lie)
@@ -703,6 +705,233 @@ def print_tree_report(report: dict, verbose: bool = False) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# handing the evidence to something that decides
+# --------------------------------------------------------------------------- #
+#
+# The division of labour this file exists to serve: this tool unpacks and reports, and
+# something with maintained signatures makes the call. Two targets cover most of the
+# world -- ClamAV for a verdict on the files, MISP for the indicators worth sharing.
+#
+# Both are read-only, and neither executes the target: a scanner reading a file is not the
+# same thing as the file running. That distinction is what lets the safety guarantee of
+# "never execute" survive integration.
+
+CLAMAV_CANDIDATES = (
+    r"C:\Program Files\ClamAV\clamscan.exe",
+    r"C:\Program Files (x86)\ClamAV\clamscan.exe",
+    "/usr/bin/clamscan",
+    "/usr/local/bin/clamscan",
+)
+
+
+def find_clamav() -> str | None:
+    """Locate clamscan, or None. Absence is reported, never worked around."""
+    env = os.environ.get("CLAMSCAN_PATH")
+    if env and Path(env).is_file():
+        return env
+    for cand in CLAMAV_CANDIDATES:
+        if Path(cand).is_file():
+            return cand
+    import shutil
+    return shutil.which("clamscan")
+
+
+def scan_with_clamav(paths, *, clamscan: str | None = None, timeout: int = 900) -> dict:
+    """Run clamscan over the given files and return its verdicts.
+
+    A signature engine reading the files is not execution; nothing here starts the sample.
+    """
+    exe = clamscan or find_clamav()
+    if not exe:
+        return {
+            "ok": False,
+            "available": False,
+            "executed": False,
+            "reason": "clamscan was not found; install ClamAV or set CLAMSCAN_PATH",
+            "install": "https://www.clamav.net/",
+        }
+    files = [str(p) for p in paths if Path(p).is_file()]
+    if not files:
+        return {"ok": True, "available": True, "executed": False, "scanned": 0,
+                "infected": 0, "verdicts": [], "reason": "nothing to scan"}
+
+    import subprocess
+    cmd = [exe, "--no-summary", "--infected", "--stdout"] + files
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "available": True, "executed": False,
+                "reason": "clamscan timed out after %ds" % timeout}
+    except OSError as exc:
+        return {"ok": False, "available": True, "executed": False,
+                "reason": "could not run clamscan: %s" % exc}
+
+    # Only accept a verdict whose file part is one of the files we asked about. ClamAV's
+    # line is "<path>: <signature> FOUND", and a Windows path contains colons of its own, so
+    # splitting on the last colon is right -- but matching against the known set is what
+    # makes it safe against a stray line that merely ends in FOUND.
+    known = {str(Path(f).resolve()).lower(): str(f) for f in files}
+    verdicts = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.rstrip()
+        if not line.endswith("FOUND") or ":" not in line:
+            continue
+        head, _, sig = line.rpartition(":")
+        candidate = head.strip()
+        matched = known.get(str(Path(candidate).resolve()).lower())
+        if matched is None:
+            base = Path(candidate).name.lower()
+            matched = next((orig for key, orig in known.items()
+                            if Path(key).name == base), None)
+        if matched is None:
+            continue
+        verdicts.append({"file": matched,
+                         "signature": sig.replace("FOUND", "").strip()})
+    return {
+        "ok": True,
+        "available": True,
+        "executed": False,
+        "clamscan": exe,
+        "scanned": len(files),
+        "infected": len(verdicts),
+        "verdicts": verdicts,
+        "reason": None,
+    }
+
+
+# --- MISP ------------------------------------------------------------------ #
+
+MISP_TYPE_FOR = {
+    "url": "url",
+    "domain": "domain",
+    "ipv4": "ip-dst",
+    "email": "email-src",
+    "registry_path": "regkey",
+    "registry_run": "regkey",
+    "named_pipe": "text",
+    "scheduled_task": "text",
+    "powershell": "text",
+    "cmd_shell": "text",
+    "service_install": "text",
+    "defender_exclusion": "text",
+    "mutex_like": "text",
+    "user_agent": "user-agent",
+    "dns_query": "text",
+}
+
+def build_misp_event(report: dict, *, info: str | None = None, distribution: int = 0,
+                     threat_level: int = 2, analysis: int = 1) -> str:
+    """A MISP event as XML, so the indicators can actually be shared.
+
+    XML rather than JSON because it is what MISP itself produces for an event: a JSON blob
+    that merely resembles one tends to import as an empty event and waste an analyst's time.
+
+    published=false on purpose -- whether this becomes shared intelligence is a human
+    decision about their own data, not something a triage tool should assume.
+    """
+    import xml.etree.ElementTree as ET
+
+    h = report["hashes"]
+    # No namespace declaration: MISP's own importer keys off the element names, and
+    # ElementTree cannot emit a prefixed namespace attribute cleanly (it mangles the
+    # declaration and leaves the tag unreachable by that name).
+    root = ET.Element("misp")
+    event = ET.SubElement(root, "Event")
+    ET.SubElement(event, "info").text = info or (
+        "Static triage: %s" % Path(report["file"]).name)
+    ET.SubElement(event, "date").text = time.strftime("%Y-%m-%d")
+    ET.SubElement(event, "threat_level_id").text = str(threat_level)
+    ET.SubElement(event, "analysis").text = str(analysis)
+    ET.SubElement(event, "distribution").text = str(distribution)
+    ET.SubElement(event, "published").text = "false"
+
+    def add_attr(etype, value, category, to_ids=False):
+        if value is None or value == "":
+            return
+        a = ET.SubElement(event, "Attribute")
+        ET.SubElement(a, "type").text = etype
+        ET.SubElement(a, "category").text = category
+        ET.SubElement(a, "to_ids").text = "true" if to_ids else "false"
+        ET.SubElement(a, "distribution").text = str(distribution)
+        ET.SubElement(a, "value").text = str(value)
+
+    add_attr("sha256", h["sha256"], "Payload delivery", True)
+    add_attr("sha1", h["sha1"], "Payload delivery", True)
+    add_attr("md5", h["md5"], "Payload delivery", True)
+    add_attr("filename", Path(report["file"]).name, "Payload delivery")
+    add_attr("size-in-bytes", h["size"], "Other")
+
+    for kind, values in (report.get("iocs") or {}).items():
+        etype = MISP_TYPE_FOR.get(kind)
+        if not etype:
+            continue
+        network = kind in ("url", "domain", "ipv4", "user_agent")
+        category = "Network activity" if network else "Artifacts dropped"
+        for v in values[:100]:
+            add_attr(etype, v, category, to_ids=network)
+
+    for tag_name in ("triage:static", "triage:never-executed"):
+        ET.SubElement(ET.SubElement(event, "Tag"), "name").text = tag_name
+    packer = (report.get("packer") or {}).get("verdict")
+    if packer not in (None, "none", "n/a"):
+        ET.SubElement(ET.SubElement(event, "Tag"), "name").text = "triage:packed"
+    if report.get("wrapper"):
+        ET.SubElement(ET.SubElement(event, "Tag"), "name").text = (
+            "triage:wrapper-%s" % report["wrapper"]["wrapper"].lower())
+
+    try:
+        ET.indent(root)                       # pretty output, Python 3.9+
+    except AttributeError:                    # pragma: no cover - Python < 3.9
+        pass
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="unicode")
+
+
+def build_stix_bundle(report: dict) -> dict:
+    """A minimal STIX 2.1 bundle: the file, plus one indicator per observable.
+
+    STIX is what TIPs and MISP's own importer consume, so this is a second door into the
+    same room as the XML event above.
+    """
+    h = report["hashes"]
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    file_obj = {
+        "type": "file",
+        "spec_version": "2.1",
+        "id": "file--" + str(uuid.uuid5(uuid.NAMESPACE_URL, h["sha256"])),
+        "hashes": {"SHA-256": h["sha256"], "SHA-1": h["sha1"], "MD5": h["md5"]},
+        "size": h["size"],
+        "name": Path(report["file"]).name,
+    }
+    objects = [file_obj]
+    for kind, values in (report.get("iocs") or {}).items():
+        for v in values[:100]:
+            if kind == "url":
+                pattern = "[url:value = '%s']" % v.replace("'", "\\'")
+            elif kind == "domain":
+                pattern = "[domain-name:value = '%s']" % v
+            elif kind == "ipv4":
+                pattern = "[ipv4-addr:value = '%s']" % v
+            elif kind == "email":
+                pattern = "[email-addr:value = '%s']" % v
+            else:
+                continue
+            objects.append({
+                "type": "indicator",
+                "spec_version": "2.1",
+                "id": "indicator--" + str(uuid.uuid5(uuid.NAMESPACE_URL, pattern)),
+                "created": now,
+                "modified": now,
+                "name": kind,
+                "pattern": pattern,
+                "pattern_type": "stix",
+                "valid_from": now,
+                "indicator_types": ["malicious-activity"],
+                "x_triage_source_file": file_obj["id"],
+            })
+    return {"type": "bundle", "id": "bundle--" + str(uuid.uuid4()), "objects": objects}
+
+
+# --------------------------------------------------------------------------- #
 # report
 # --------------------------------------------------------------------------- #
 
@@ -835,7 +1064,9 @@ def build_report(path: Path, out_dir: Path | None) -> dict:
 def build_report_with_unpack(path: Path, out_dir: Path | None, unpack: bool) -> dict:
     """A report, optionally extended with what an actual unpack found inside."""
     report = build_report(path, out_dir)
-    if not unpack or unpack_mod is None:
+    if not unpack:
+        return report                       # not asked for: say nothing rather than "failed"
+    if unpack_mod is None:
         report["unpack"] = {"ok": False, "executed": False,
                             "reason": "unpack.py is not available next to triage.py"}
         return report
@@ -960,6 +1191,16 @@ def print_human(report: dict) -> None:
                     print("    %-44s %9d B%s" % (row["path"], row["size"], extra))
         else:
             print("unpacked    : not done (%s)" % u.get("reason"))
+    av = report.get("antivirus")
+    if av:
+        if not av.get("available"):
+            print("antivirus   : not available (%s)" % av.get("reason"))
+        elif av.get("infected"):
+            print("antivirus   : %d infected of %d scanned" % (av["infected"], av["scanned"]))
+            for v in av["verdicts"][:6]:
+                print("    %s -- %s" % (Path(v["file"]).name, v["signature"]))
+        else:
+            print("antivirus   : %d scanned, nothing detected" % av.get("scanned", 0))
     print("executed    : no (never)")
 
 
@@ -975,6 +1216,10 @@ def main(argv=None) -> int:
                     help="also unpack a recognised wrapper in-process (never executes it)")
     ap.add_argument("--scan", metavar="DIR",
                     help="triage every file in a directory and report which ones stand out")
+    ap.add_argument("--scan-av", action="store_true",
+                    help="also ask ClamAV for a verdict (reads files, never runs them)")
+    ap.add_argument("--feed", choices=("misp", "stix", "both"),
+                    help="write threat-intelligence output for sharing (misp=xml, stix=json)")
     args = ap.parse_args(argv)
 
     path = Path(args.target) if args.target else None
@@ -1011,6 +1256,14 @@ def main(argv=None) -> int:
         return 2
 
     report = build_report_with_unpack(path, Path(args.out) if args.out else None, args.unpack)
+
+    if args.scan_av:
+        targets = [path]
+        if report.get("unpack", {}).get("ok"):
+            targets += [Path(r["path"]) for r in (report.get("inside") or [])]
+            base = Path(report["unpack"]["out_dir"])
+            targets = [path] + [base / r["path"] for r in (report.get("inside") or [])]
+        report["antivirus"] = scan_with_clamav(targets)
     if args.out:
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
@@ -1020,6 +1273,21 @@ def main(argv=None) -> int:
         if not args.quiet:
             print("report -> %s" % (out / "report.json"))
             print("yara   -> %s" % (out / "rule.yar"))
+    if args.feed:
+        out = Path(args.out) if args.out else Path.cwd()
+        out.mkdir(parents=True, exist_ok=True)
+        wrote = []
+        if args.feed in ("misp", "both"):
+            (out / "event.xml").write_text(build_misp_event(report), encoding="utf-8")
+            wrote.append("event.xml")
+        if args.feed in ("stix", "both"):
+            (out / "stix.json").write_text(
+                json.dumps(build_stix_bundle(report), ensure_ascii=False, indent=1),
+                encoding="utf-8")
+            wrote.append("stix.json")
+        if not args.quiet:
+            print("intel       : %s" % ", ".join(wrote))
+
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=1))
     elif not args.quiet:

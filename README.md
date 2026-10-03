@@ -44,6 +44,7 @@ Three things this tool therefore does **not** claim:
 | **Embedded images** | PE files inside the file, located by header, offered for carving. |
 | **Unpack (in-process)** | `--unpack` calls [Nanodesu!](https://github.com/Nesarf/Nanodesu) as a module — no subprocess, no shell — to actually unpack a PyInstaller archive, then triages the executables it produced. Set `NANODESU_PATH` if it is not in a known location. |
 | **Batch scan** | `--scan DIR` triages every file in a directory and reports only the ones that stand out, ranked. On a real 200-file Python distribution it reports **0**; on a file carrying the injection triad it reports that file first. |
+| **Verdict** | `--scan-av` asks ClamAV; `--feed misp\|stix\|both` writes an importable MISP event and/or a STIX 2.1 bundle. |
 | **Report** | `report.json` (machine-readable), a human summary, and `rule.yar` labelled `UNREVIEWED`. |
 
 ## Install
@@ -89,6 +90,39 @@ Every entry in `next steps` is marked either `safe (no execution)` or
 `needs execution`; anything in the second category comes with the instruction to do it in
 a VM, and this tool does not do it for you.
 
+## Handing the evidence to something that decides
+
+The durable division of labour: this tool unpacks and reports; something with maintained
+signatures makes the call. Two targets cover most of the world, and both are read-only —
+a scanner *reading* a file is not the file running, which is what lets the "never execute"
+guarantee survive integration.
+
+### ClamAV
+
+```bash
+python triage.py suspicious.exe --scan-av --unpack
+```
+
+`--scan-av` runs `clamscan` over the sample and anything the unpack produced, and reports
+signature verdicts. It finds ClamAV on `PATH`, in the usual install locations, or via
+`CLAMSCAN_PATH`. **If ClamAV is not installed, it says so and moves on** — a missing
+scanner never turns into a broken feature.
+
+### MISP and STIX
+
+```bash
+python triage.py suspicious.exe --feed both -o ./out
+```
+
+| File | Format | Purpose |
+|---|---|---|
+| `event.xml` | MISP event XML | import into MISP; hashes are `to_ids`, network indicators land in *Network activity*, persistence strings in *Artifacts dropped* |
+| `stix.json` | STIX 2.1 bundle | for a TIP or MISP's STIX importer |
+
+The MISP event is written as `published=false` on purpose: whether your indicators become
+shared intelligence is a decision about your own data, not one a triage tool should make
+for you.
+
 ## Signals are graded, and the grading is the point
 
 An import is not a verdict. `IsDebuggerPresent` is how CPython implements `sys.gettrace`;
@@ -117,7 +151,7 @@ trojan carrying the injection triad and a misnamed extension. Both directions ar
 python -m unittest discover -s test -v
 ```
 
-41 tests, no samples required: every fixture is a small synthetic file, including a
+59 tests, no samples required: every fixture is a small synthetic file, including a
 hand-assembled PE. A suite that needs real malware is a suite that stops being run.
 
 The PE parser is additionally validated against real binaries, which is the baseline that
@@ -137,7 +171,8 @@ functions, `advapi32.dll` → 35 / 656, `shell32.dll` → 79 / 1087.
 * **Unpacking runtime packers.** Needs execution.
 * **Network lookups.** No VirusTotal, no hash reputation, no telemetry. The tool works
   on an air-gapped machine by design.
-* **A detection engine.** See the safety model above.
+* **A detection engine.** See the safety model above. The signature engine is ClamAV; the
+  sharing formats are MISP and STIX. This tool's job is to make the sample legible to them.
 * **Auto-removal of anything.** Left to engines that maintain signatures and to the
   operator who knows the machine.
 
