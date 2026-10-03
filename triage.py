@@ -47,7 +47,7 @@ try:
 except ImportError:                                # pragma: no cover - unpack.py ships with us
     unpack_mod = None
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 # --------------------------------------------------------------------------- #
 # format identification (magic bytes, because extensions lie)
@@ -177,6 +177,181 @@ STRONG_SIGNAL_IMPORTS = {
     "setwindowshookex", "cryptencrypt", "urldownloadtofile", "createservice",
     "ntunmapviewofsection", "rtlcreateuserthread",
 }
+
+# Capabilities that destroy rather than infect. Kept in a separate tier because the evidence
+# for them is structural and precise, while the APIs involved are individually ordinary:
+# DeviceIoControl is used by every driver-adjacent program. What is not ordinary is writing
+# to a physical drive, or carrying a boot sector.
+DESTRUCTIVE_IMPORTS = {
+    "deviceiocontrol": "can issue raw device control codes (IOCTL_DISK_* writes the "
+                       "partition table or boot sector)",
+    "ntwritefile": "raw write, used to reach \\\\.\\PhysicalDrive from native code",
+    "zwwritefile": "raw write, used to reach \\\\.\\PhysicalDrive from native code",
+    "shellexecutew": "launches other programs",
+}
+
+# Paths that address a raw disk or volume rather than a file. Legitimate disk utilities use
+# these; almost nothing else does, which is what makes them worth reporting.
+RAW_DISK_PATTERNS = (
+    b"\\\\.\\PhysicalDrive",
+    b"\\\\.\\physicaldrive",
+    b"\\\\.\\Scsi",
+    b"\\\\.\\C:",
+    b"\\\\.\\Harddisk",
+    b"IOCTL_DISK_SET_DRIVE_LAYOUT",
+    b"IOCTL_DISK_WRITE",
+)
+
+
+# Partition type bytes that the on-disk format actually defines. A boot sector carrying a
+# replacement partition table will use one of these; a chance byte pair in compressed data
+# will not.
+KNOWN_PARTITION_TYPES = {
+    0x01, 0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0E, 0x0F, 0x11, 0x12, 0x14, 0x16, 0x17,
+    0x1B, 0x1C, 0x1E, 0x27, 0x2B, 0x2C, 0x39, 0x42, 0x44, 0x4D, 0x4E, 0x4F, 0x50, 0x51,
+    0x52, 0x63, 0x64, 0x65, 0x70, 0x75, 0x7F, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88,
+    0x8E, 0x93, 0x9F, 0xA0, 0xA5, 0xA6, 0xA8, 0xA9, 0xAB, 0xAF, 0xBE, 0xBF, 0xC1, 0xC2,
+    0xC3, 0xC4, 0xC6, 0xC7, 0xDA, 0xDB, 0xDE, 0xDF, 0xE1, 0xE3, 0xE4, 0xE6, 0xEB, 0xEE,
+    0xEF, 0xFB, 0xFC, 0xFD,
+}
+
+
+def find_boot_sector_pattern(data: bytes, limit: int = 8 << 20) -> list:
+    """Look for a boot sector embedded in a file.
+
+    A 512-byte MBR has a very specific shape: it ends with 0x55 0xAA at offset 510, and the
+    bytes just before it are a partition table. Tooling that overwrites a boot sector has to
+    carry a replacement for it, so finding that shape inside an ordinary executable is worth
+    reporting -- it is the difference between 'this program touches disks' and 'this program
+    brings its own boot code'.
+    """
+    head = data[:limit]
+    hits = []
+    # len - 511, not len - 512: a 512-byte boot sector at offset 0 needs the loop to run
+    # at least once, and the off-by-one made that case invisible.
+    for i in range(0, max(0, len(head) - 511)):
+        if head[i + 510] != 0x55 or head[i + 511] != 0xAA:
+            continue
+        # A real partition table is four 16-byte entries, and the type byte has to be a
+        # value the format actually defines. Accepting an arbitrary byte here produced a
+        # false positive on an ordinary binary: two bytes reading 55 AA at the right place
+        # are common in compressed data, and the byte after the status was 0x24 -- not a
+        # partition type at all.
+        entries = []
+        for k in range(4):
+            e = head[i + 446 + k * 16:i + 462 + k * 16]
+            if len(e) < 16:
+                continue
+            status, ptype = e[0], e[4]
+            if status not in (0x00, 0x80):
+                continue
+            if ptype == 0x00:
+                continue
+            if ptype not in KNOWN_PARTITION_TYPES:
+                continue
+            if e[1] == 0xFF or e[5] == 0xFF:
+                continue      # 0xFF is the field's "unused" value; 0xFE is a legitimate head
+            # Two discriminators, chosen after testing both mistakes:
+            #
+            # A chance 55 AA window in compressed data carried a valid type byte (0x06) with a
+            # start LBA of 1.7 billion and 2.9 billion sectors, so the geometry has to be
+            # bounded. But requiring the CHS field to agree with the LBA rejected genuine
+            # MBRs, because those fields are legacy and tools leave them at sentinel values.
+            #
+            # So: CHS only has to be in range, the LBA has to be a sane size, and -- the
+            # discriminator that actually separates the two cases -- the boot sector has to
+            # start where boot sectors start. A real one is aligned to its own size.
+            start_cyl, start_head, start_sector = e[1], e[2], e[3] & 0x3F
+            end_cyl = ((e[6] << 2) | (e[7] >> 6)) & 0x3FF
+            end_sector = e[7] & 0x3F
+            start_lba = int.from_bytes(e[8:12], "little")
+            sectors = int.from_bytes(e[12:16], "little")
+            if not (0 <= start_cyl <= 1023 and 0 <= end_cyl <= 1023):
+                continue
+            if not (1 <= end_sector <= 63):
+                continue
+            if start_sector and not (1 <= start_sector <= 63):
+                continue
+            # No alignment requirement: a boot sector appended to a dropper is not
+            # sector-aligned in the file. The bounded-geometry checks above are what separate
+            # it from chance data.
+            if not (0 < start_lba < (1 << 32)):
+                continue
+            if not (0 < sectors < (1 << 32)):
+                continue
+            if sectors > 4096 * 1024 * 1024 // 512:      # 4 TiB of 512-byte sectors
+                continue
+            entries.append({"type": hex(ptype), "start_lba": start_lba, "sectors": sectors})
+        if entries:
+            hits.append({"offset": i, "size": 512, "partitions": entries,
+                         "sha256": hashlib.sha256(head[i:i + 512]).hexdigest()[:32]})
+        if len(hits) >= 8:
+            break
+    return hits
+
+
+def detect_destructive(pe: dict | None, data: bytes, imports: list,
+                       strings: dict) -> dict:
+    """Report capabilities whose effect is unrecoverable, as distinct from merely hostile.
+
+    This tier exists because of a real gap: an MBR overwriter needs DeviceIoControl plus a
+    write to \\\\.\\PhysicalDrive0, and none of that appeared anywhere in the import tiers.
+    A tool aimed at unknown files should say "this can destroy the machine" when the evidence
+    is there, and should say it with the precision the evidence actually has.
+    """
+    findings = []
+    all_funcs = {fn.lower() for imp in imports for fn in imp["functions"]}
+    all_dlls = {imp["dll"].lower() for imp in imports}
+
+    disks = []
+    if pe:
+        for s in pe["sections"]:
+            off = s["rawptr"]
+            body = data[off:off + min(s["rawsize"], 4 << 20)]
+            for pat in RAW_DISK_PATTERNS:
+                if pat in body and pat not in [d.encode() for d in disks]:
+                    disks.append(pat.decode("latin1", "replace"))
+    for pat in RAW_DISK_PATTERNS[:4]:
+        if pat in data[:1 << 20] and pat.decode("latin1", "replace") not in disks:
+            disks.append(pat.decode("latin1", "replace"))
+    if disks:
+        findings.append({
+            "capability": "raw disk or volume access",
+            "evidence": "device path string(s) present: " + ", ".join(disks[:4]) +
+                        " (a reference only; not proof of a write)",
+            "severity": "medium",
+        })
+
+    boot = find_boot_sector_pattern(data)
+    if boot:
+        findings.append({
+            "capability": "embedded boot sector",
+            "evidence": "%d region(s) ending in 0x55AA at offset 510, first at %#x"
+                        % (len(boot), boot[0]["offset"]),
+            "severity": "critical",
+        })
+
+    # DeviceIoControl and WriteFile are not evidence of anything: both are ordinary imports
+    # in most Windows binaries (kernel32.dll and shell32.dll import them, and so does every
+    # archiver). The pair was tried as a rule and flagged five benign binaries out of seven,
+    # so destructiveness is judged on structural evidence only:
+    #   - a boot sector, verified against the partition-table format
+    #   - a raw device path, recorded as moderate rather than high
+    #   - terminology, recorded as low
+    # Word-boundary matching: a plain substring test flagged a Python extension module
+    # because unicode character data contains "UMBRELLA", which contains "MBR".
+    interesting = " ".join(strings.get("interesting", [])).lower()
+    for marker in ("physicaldrive", "boot sector", "bsod", "format c:"):
+        if marker in interesting and not any(marker in f["evidence"].lower() for f in findings):
+            findings.append({"capability": "destructive terminology",
+                             "evidence": "string mentions %r" % marker,
+                             "severity": "low"})
+
+    severity_rank = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+    worst = max((f["severity"] for f in findings), key=lambda s: severity_rank[s],
+                default=None)
+    return {"findings": findings, "highest": worst, "count": len(findings),
+            "boot_sectors": boot}
 
 
 def shannon_entropy(data: bytes) -> float:
@@ -1051,9 +1226,17 @@ def hashes_of(data: bytes, part: int = 0) -> dict:
 
 
 def assess(pe: dict | None, packer: dict, strings: dict, iocs: dict,
-           imports: list, embedded: list) -> dict:
+           imports: list, embedded: list, destructive: dict | None = None) -> dict:
     """A short list of reasons this file deserves attention. Not a verdict."""
     reasons = []
+    # Destructive capability is reported first. It is the one finding whose consequence is
+    # unrecoverable, and it is judged on structural evidence rather than on an import that
+    # ordinary software also uses.
+    if destructive and destructive.get("count"):
+        for f in destructive["findings"]:
+            if f["severity"] in ("high", "critical"):
+                reasons.append("%s [%s]: %s" % (f["capability"].upper(), f["severity"],
+                                                f["evidence"]))
     if packer["verdict"] not in ("none",):
         reasons.append("packed or encrypted: " + ", ".join(
             f["packer"] for f in packer["findings"]))
@@ -1147,6 +1330,7 @@ def build_report(path: Path, out_dir: Path | None) -> dict:
     embedded = find_embedded_executables(data)
     pyinstaller = detect_pyinstaller(data)
     wrappers = detect_other_wrappers(data)
+    destructive = detect_destructive(pe, data, imports, strings)
     report = {
         "tool": "triage",
         "version": VERSION,
@@ -1161,6 +1345,7 @@ def build_report(path: Path, out_dir: Path | None) -> dict:
         "other_wrapper_markers": wrappers,
         "language": detect_language(data, pe=pe),
         "embedded_executables": embedded,
+        "destructive": destructive,
         "iocs": iocs,
         "strings": strings,
         "base64_candidates": base64_candidates(strings),
@@ -1168,7 +1353,7 @@ def build_report(path: Path, out_dir: Path | None) -> dict:
         "unpack_plan": [],
         "executed_target": False,
     }
-    report["assessment"] = assess(pe, packer, strings, iocs, imports, embedded)
+    report["assessment"] = assess(pe, packer, strings, iocs, imports, embedded, destructive)
     report["unpack_plan"] = plan_unpacking(report)
     report["yara_draft"] = draft_yara(report)
     return report
@@ -1289,6 +1474,11 @@ def print_human(report: dict) -> None:
         print("attention   :")
         for r in report["assessment"]["reasons"]:
             print("    - %s" % r)
+    if report.get("destructive", {}).get("count"):
+        print("destructive : highest severity %s" % report["destructive"]["highest"])
+        for f in report["destructive"]["findings"]:
+            print("    [%-8s] %s -- %s" % (f["severity"], f["capability"], f["evidence"]))
+
     print("next steps  :")
     for step in report["unpack_plan"]:
         mark = "needs execution" if step["needs_execution"] else "safe (no execution)"
