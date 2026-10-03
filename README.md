@@ -42,6 +42,8 @@ Three things this tool therefore does **not** claim:
 | **Indicators** | URLs, IPs, domains, mail addresses, registry `Run` keys, services, scheduled tasks, PowerShell/cmd lines, named pipes, Defender exclusions. Documentation hosts and RFC1918 ranges are filtered; a version string like `6.0.0.0` is deliberately kept, because a false positive you can see beats one hidden from you. |
 | **Strings** | ASCII and UTF-16LE (wide strings matter: a .NET or wide-char sample hides there), plus base64 blobs with their decoded heads, flagged when they decode to a PE. |
 | **Embedded images** | PE files inside the file, located by header, offered for carving. |
+| **Unpack (in-process)** | `--unpack` calls [Nanodesu!](https://github.com/Nesarf/Nanodesu) as a module — no subprocess, no shell — to actually unpack a PyInstaller archive, then triages the executables it produced. Set `NANODESU_PATH` if it is not in a known location. |
+| **Batch scan** | `--scan DIR` triages every file in a directory and reports only the ones that stand out, ranked. On a real 200-file Python distribution it reports **0**; on a file carrying the injection triad it reports that file first. |
 | **Report** | `report.json` (machine-readable), a human summary, and `rule.yar` labelled `UNREVIEWED`. |
 
 ## Install
@@ -62,6 +64,8 @@ archive and tells you the exact command to unpack it.
 python triage.py suspicious.exe
 python triage.py suspicious.exe -o ./out        # also writes report.json and rule.yar
 python triage.py suspicious.exe --json          # machine-readable on stdout
+python triage.py suspicious.exe --unpack        # actually unpack it, then triage the inside
+python triage.py --scan ./downloads             # which of these files deserves my time?
 ```
 
 Example summary:
@@ -85,13 +89,35 @@ Every entry in `next steps` is marked either `safe (no execution)` or
 `needs execution`; anything in the second category comes with the instruction to do it in
 a VM, and this tool does not do it for you.
 
+## Signals are graded, and the grading is the point
+
+An import is not a verdict. `IsDebuggerPresent` is how CPython implements `sys.gettrace`;
+`GetProcAddress` is how every delay-load stub works; `VirtualAlloc` is used by any JIT. A
+scanner that flags those produces a list nobody reads.
+
+So attention is raised by:
+
+* the **injection triad** — `VirtualAlloc` + `WriteProcessMemory` + `CreateRemoteThread`
+  together, which is what process injection actually looks like
+* a **packer verdict** built from section names, marker scans, or a genuinely empty import
+  table — not from "few imports", and not for an API-set forwarder
+  (`api-ms-win-*`), which has almost no imports by design
+* a **high-entropy executable section**
+* a **name that contradicts the contents**
+
+Weak signals are recorded (`noted_imports`) without raising attention.
+
+This is a calibration, not a heuristic: on a real 200-file Python distribution the scan
+reports **zero** interesting files, and the same build of the tool still flags a synthetic
+trojan carrying the injection triad and a misnamed extension. Both directions are tested.
+
 ## Testing
 
 ```bash
 python -m unittest discover -s test -v
 ```
 
-21 tests, no samples required: every fixture is a small synthetic file, including a
+41 tests, no samples required: every fixture is a small synthetic file, including a
 hand-assembled PE. A suite that needs real malware is a suite that stops being run.
 
 The PE parser is additionally validated against real binaries, which is the baseline that

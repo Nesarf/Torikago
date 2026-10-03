@@ -39,7 +39,13 @@ import zlib
 from collections import Counter
 from pathlib import Path
 
-VERSION = "0.1.0"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import unpack as unpack_mod
+except ImportError:                                # pragma: no cover - unpack.py ships with us
+    unpack_mod = None
+
+VERSION = "0.2.0"
 
 # --------------------------------------------------------------------------- #
 # format identification (magic bytes, because extensions lie)
@@ -88,7 +94,9 @@ def extension_mismatch(kind: str, path: Path) -> str | None:
     ext = path.suffix.lower().lstrip(".")
     if not ext:
         return None
-    binary_exts = {"exe", "dll", "scr", "com", "sys", "ocx", "cpl"}
+    # .pyd is a Python extension module: a real DLL under a conventional name, not a disguise.
+    binary_exts = {"exe", "dll", "scr", "com", "sys", "ocx", "cpl", "pyd", "so", "node",
+                   "dylib", "efi", "acm", "ax", "drv", "tsp"}
     image_exts = {"png", "jpg", "jpeg", "gif", "bmp", "webp", "ico"}
     if kind == "pe" and ext not in binary_exts:
         return f"named .{ext} but is a PE executable"
@@ -157,10 +165,15 @@ HIGH_ENTROPY = 7.2
 
 # APIs that are only meaningful alongside other evidence (packing, an embedded image,
 # a network indicator). On their own they are ordinary program behaviour.
+# APIs that are rare enough to raise attention on their own. Deliberately excludes the ones
+# ordinary software calls constantly: IsDebuggerPresent is how CPython implements
+# sys.gettrace, GetProcAddress is how every delay-load stub works, VirtualProtect is used by
+# any JIT. Those are recorded as "noted" instead, and the injection triad below is what
+# actually escalates.
 STRONG_SIGNAL_IMPORTS = {
-    "writeprocessmemory", "createremotethread", "setwindowshookex", "checkremotedebuggerpresent",
-    "ntqueryinformationprocess", "cryptencrypt", "urldownloadtofile", "createservice",
-    "shellexecute", "winexec", "virtualprotect",
+    "writeprocessmemory", "createremotethread", "ntmapviewofsection", "queueuserapc",
+    "setwindowshookex", "cryptencrypt", "urldownloadtofile", "createservice",
+    "ntunmapviewofsection", "rtlcreateuserthread",
 }
 
 
@@ -291,6 +304,9 @@ def parse_imports(data: bytes, pe: dict) -> list:
     return out
 
 
+# A Windows API-set forwarder (api-ms-win-*, ext-ms-win-*) has almost no imports by design:
+# it exists to forward names to the real DLL. So do delay-load stubs. Calling those "packed"
+# is a false positive, and a triage tool that cries wolf on every system DLL is not used twice.
 def identify_packer(pe: dict, data: bytes, imports: list) -> dict:
     """Name the packer when the evidence is there, otherwise say 'unknown'."""
     findings = []
@@ -315,6 +331,14 @@ def identify_packer(pe: dict, data: bytes, imports: list) -> dict:
     if {"upx0", "upx1"} <= stub_names or {"upx0", "upx1", "upx2"} <= stub_names:
         findings.append({"packer": "UPX", "evidence": "upx0/upx1 section pair"})
 
+    # Forwarders and stubs legitimately have almost no imports, so the empty-import evidence
+    # is only reported when the file does not look like one. Two tells: an API-set name
+    # (api-ms-win-*, ext-ms-win-*), which exists purely to forward names, and a small image
+    # that exports things it does not import.
+    name_is_api_set = bool(re.search(rb"(?:api|ext)-ms-win-", data[:0x2000], re.I))
+    has_exports = bool(pe["directories"].get("export"))
+    stub_like = name_is_api_set or (len(data) < 0x10000 and has_exports)
+
     exec_sections = [s for s in pe["sections"] if s["executable"]]
     high = [s for s in pe["sections"] if s["entropy"] >= HIGH_ENTROPY]
     if exec_sections and len(high) == len(pe["sections"]):
@@ -323,20 +347,20 @@ def identify_packer(pe: dict, data: bytes, imports: list) -> dict:
     if exec_sections and high and any(s["executable"] for s in high):
         findings.append({"packer": "likely packed",
                          "evidence": "executable section is high-entropy (encrypted or compressed code)"})
-    # An import table with one or two entries is the classic packer stub.
     total_imports = sum(i["count"] for i in imports)
-    if imports and total_imports <= 5:
-        findings.append({"packer": "likely packed",
-                         "evidence": f"only {total_imports} imported functions"})
-    if not imports:
+    if not stub_like and total_imports == 0:
+        # A near-empty import table is the classic packer stub, but "few imports" is not:
+        # a small legitimate DLL can import one function. Only zero imports counts, and the
+        # high-entropy evidence above covers stubs that do resolve a handful of APIs.
         findings.append({"packer": "likely packed or delay-loaded",
-                         "evidence": "no import directory"})
+                         "evidence": "no imported functions"})
 
     dedup = {}
     for f in findings:
         dedup.setdefault(f["packer"], set()).add(f["evidence"])
     return {"verdict": sorted(dedup)[0] if len(dedup) == 1 else ("multiple" if dedup else "none"),
-            "findings": [{"packer": k, "evidence": sorted(v)} for k, v in dedup.items()]}
+            "findings": [{"packer": k, "evidence": sorted(v)} for k, v in dedup.items()],
+            "forwarder_or_stub": stub_like}
 
 
 # --------------------------------------------------------------------------- #
@@ -537,6 +561,147 @@ def base64_candidates(strings: dict, limit: int = 25) -> list:
     return found
 
 
+# --- inside-peek: triage the files a wrapper produced, without loading them whole ---- #
+
+PEEK_BYTES = 4 << 20          # 4 MB of each inner file is enough to type it and read its PE header
+
+
+def find_inner_executables(root: Path, limit: int = 40) -> list:
+    """Executable files inside an unpacked tree, so the interesting ones surface first.
+
+    Only the head of each file is read: a 200 MB inner DLL does not need to be loaded to be
+    typed and have its PE header parsed, and reading it whole would defeat the point of a
+    tool that is supposed to be cheap to point at anything.
+    """
+    out = []
+    if not root.is_dir():
+        return out
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in (".exe", ".dll", ".pyd", ".so", ".sys", ".scr", ".cpl",
+                                    ".ocx", ".node", ".dylib", ".elf", ".bin"):
+            continue
+        try:
+            with p.open("rb") as fh:
+                head = fh.read(PEEK_BYTES)
+            size = p.stat().st_size
+        except OSError:
+            continue
+        if not head:
+            continue
+        kind = identify(head, p)
+        pe = parse_pe(head) if kind["kind"] == "pe" else None
+        if kind["kind"] != "pe" and p.suffix.lower() not in (".exe", ".dll", ".pyd", ".sys"):
+            continue
+        imports = parse_imports(head, pe) if pe else []
+        packer = identify_packer(pe, head, imports) if pe else {"verdict": "n/a", "findings": []}
+        out.append({
+            "path": str(p.relative_to(root)),
+            "size": size,
+            "sha256_head": hashlib.sha256(head).hexdigest(),
+            "kind": kind["kind"],
+            "packer": packer["verdict"],
+            "packer_findings": packer["findings"],
+            "imports": sum(i["count"] for i in imports),
+            "suspicious_imports": sorted({
+                fn for i in imports for fn in i["functions"]
+                if fn.lower() in STRONG_SIGNAL_IMPORTS}),
+            "noted_imports": sorted({
+                fn for i in imports for fn in i["functions"]
+                if fn.lower() in SUSPICIOUS_IMPORTS and fn.lower() not in STRONG_SIGNAL_IMPORTS}),
+            "entropy_max": max((s["entropy"] for s in (pe["sections"] if pe else [])), default=0.0),
+            "truncated_head": size > PEEK_BYTES,
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+def scan_tree(root: Path, *, limit: int = 200) -> dict:
+    """Triage every file in a directory: the answer to 'which of these is worth my time?'."""
+    rows = []
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        try:
+            with p.open("rb") as fh:
+                head = fh.read(PEEK_BYTES)
+        except OSError:
+            continue
+        if not head:
+            continue
+        kind = identify(head, p)
+        pe = parse_pe(head) if kind["kind"] == "pe" else None
+        imports = parse_imports(head, head and pe) if pe else []
+        packer = identify_packer(pe, head, imports) if pe else {"verdict": "n/a", "findings": []}
+        pyinstaller = detect_pyinstaller(head) if kind["kind"] == "pe" else None
+        row = {
+            "path": str(p.relative_to(root)),
+            "size": p.stat().st_size,
+            "kind": kind["kind"],
+            "label": kind["label"],
+            "mismatch": extension_mismatch(kind["kind"], p),
+            "packer": packer["verdict"],
+            "wrapper": pyinstaller["wrapper"] if pyinstaller else None,
+            "entropy_max": max((s["entropy"] for s in (pe["sections"] if pe else [])), default=None),
+            "suspicious_imports": sorted({
+                fn for i in imports for fn in i["functions"]
+                if fn.lower() in STRONG_SIGNAL_IMPORTS}),
+            "noted_imports": sorted({
+                fn for i in imports for fn in i["functions"]
+                if fn.lower() in SUSPICIOUS_IMPORTS
+                and fn.lower() not in STRONG_SIGNAL_IMPORTS}),
+            # The full set, because the injection triad is judged on it rather than on the
+            # strong/weak split: VirtualAlloc is ordinary on its own but is one third of the
+            # pattern, so a tier-based check would miss the combination.
+            "all_imports": sorted({fn for i in imports for fn in i["functions"]}),
+            "note": None,
+        }
+        reasons = []
+        if row["mismatch"]:
+            reasons.append(row["mismatch"])
+        if row["packer"] not in ("none", "n/a"):
+            reasons.append("packed: %s" % row["packer"])
+        # The injection triad is the single most meaningful import signal there is: memory
+        # allocation plus a write into another process plus a remote thread. Weak signals
+        # such as IsDebuggerPresent are recorded but do not raise attention on their own,
+        # because CPython's own extension modules import it (sys.gettrace uses it).
+        all_imports_lower = {f.lower() for f in (row.get("all_imports") or [])}
+        if {"virtualalloc", "writeprocessmemory", "createremotethread"} <= all_imports_lower:
+            reasons.append("injection triad (VirtualAlloc + WriteProcessMemory + CreateRemoteThread)")
+        elif row["suspicious_imports"]:
+            reasons.append("imports: " + ", ".join(row["suspicious_imports"][:4]))
+        if row["entropy_max"] and row["entropy_max"] >= HIGH_ENTROPY and pe and any(
+                s["executable"] and s["entropy"] >= HIGH_ENTROPY for s in pe["sections"]):
+            reasons.append("high-entropy executable section")
+        row["note"] = "; ".join(reasons)
+        row["attention"] = len(reasons)
+        rows.append(row)
+        if len(rows) >= limit:
+            break
+    rows.sort(key=lambda r: (-r["attention"], -r["size"]))
+    return {"root": str(root), "scanned": len(rows),
+            "interesting": sum(1 for r in rows if r["attention"]), "rows": rows}
+
+
+def print_tree_report(report: dict, verbose: bool = False) -> None:
+    print("scanned     : %d files under %s" % (report["scanned"], report["root"]))
+    print("interesting : %d" % report["interesting"])
+    print()
+    interesting = [r for r in report["rows"] if r["attention"]]
+    shown = interesting if interesting or verbose else []
+    if not shown:
+        print("  nothing flagged")
+    for r in shown:
+        print("  [%d] %-52s %9d B  %s" % (r["attention"], r["path"], r["size"], r["kind"]))
+        if r["note"]:
+            print("        %s" % r["note"])
+    if interesting:
+        print()
+        print("  full list of flagged files is in report.json")
+
+
 # --------------------------------------------------------------------------- #
 # report
 # --------------------------------------------------------------------------- #
@@ -667,6 +832,36 @@ def build_report(path: Path, out_dir: Path | None) -> dict:
     return report
 
 
+def build_report_with_unpack(path: Path, out_dir: Path | None, unpack: bool) -> dict:
+    """A report, optionally extended with what an actual unpack found inside."""
+    report = build_report(path, out_dir)
+    if not unpack or unpack_mod is None:
+        report["unpack"] = {"ok": False, "executed": False,
+                            "reason": "unpack.py is not available next to triage.py"}
+        return report
+    kind = report["identified_as"]["kind"]
+    if report["wrapper"]:
+        dest = (out_dir or path.parent / (path.stem + "_unpacked"))
+        res = unpack_mod.unpack_pyinstaller(path, dest, with_pyc=True)
+        report["unpack"] = res
+        if res.get("ok"):
+            report["inside"] = find_inner_executables(dest)
+            report["inside_scan"] = scan_tree(dest)
+        else:
+            report["unpack"]["hint"] = ("point %s at nanodesu.py, or install it with "
+                                        "pip install nanodesu" % unpack_mod.NANODESU_ENV)
+    elif kind == "unknown" and path.suffix.lower() == ".pyz":
+        dest = (out_dir or path.parent / (path.stem + "_pyz"))
+        res = unpack_mod.unpack_pyz(path, dest)
+        report["unpack"] = res
+        if res.get("ok"):
+            report["inside"] = find_inner_executables(dest)
+    else:
+        report["unpack"] = {"ok": False, "executed": False,
+                            "reason": "no in-process unpacker for %s" % kind}
+    return report
+
+
 def plan_unpacking(report: dict) -> list:
     """What could be done next, and explicitly what requires running the sample."""
     plan = []
@@ -750,6 +945,21 @@ def print_human(report: dict) -> None:
         mark = "needs execution" if step["needs_execution"] else "safe (no execution)"
         print("    [%s] %s" % (mark, step["step"]))
         print("        %s" % step["run"])
+    if report.get("unpack"):
+        u = report["unpack"]
+        if u.get("ok"):
+            print("unpacked    : %d files -> %s" % (u.get("files_written", 0), u.get("out_dir")))
+            if report.get("inside"):
+                print("inside      : %d executable file(s)" % len(report["inside"]))
+                for row in report["inside"][:8]:
+                    extra = ""
+                    if row["packer"] not in ("none", "n/a"):
+                        extra += " packed=%s" % row["packer"]
+                    if row["suspicious_imports"]:
+                        extra += " imports=%s" % ",".join(row["suspicious_imports"][:3])
+                    print("    %-44s %9d B%s" % (row["path"], row["size"], extra))
+        else:
+            print("unpacked    : not done (%s)" % u.get("reason"))
     print("executed    : no (never)")
 
 
@@ -757,21 +967,50 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="triage",
         description="Static triage for an unknown executable. Never runs the target.")
-    ap.add_argument("target", help="file to inspect")
+    ap.add_argument("target", nargs="?", help="file to inspect (or use --scan DIR)")
     ap.add_argument("-o", "--out", help="directory for report.json and rule.yar")
     ap.add_argument("--json", action="store_true", help="print JSON instead of a summary")
     ap.add_argument("--quiet", action="store_true", help="write files only")
+    ap.add_argument("--unpack", action="store_true",
+                    help="also unpack a recognised wrapper in-process (never executes it)")
+    ap.add_argument("--scan", metavar="DIR",
+                    help="triage every file in a directory and report which ones stand out")
     args = ap.parse_args(argv)
 
-    path = Path(args.target)
-    if not path.exists():
+    path = Path(args.target) if args.target else None
+    if path is not None and not path.exists():
         print("no such file: %s" % path, file=sys.stderr)
         return 1
-    if path.is_dir():
-        print("that is a directory: %s" % path, file=sys.stderr)
+    if path is not None and path.is_dir():
+        print("that is a directory: %s -- did you mean --scan %s ?" % (path, path), file=sys.stderr)
         return 1
 
-    report = build_report(path, Path(args.out) if args.out else None)
+    if args.scan:
+        # --scan stands alone: no positional file is needed. Checked before anything else
+        # touches args.target.
+        root = Path(args.scan)
+        if not root.is_dir():
+            print("not a directory: %s" % root, file=sys.stderr)
+            return 1
+        tree = scan_tree(root)
+        if args.out:
+            o = Path(args.out)
+            o.mkdir(parents=True, exist_ok=True)
+            (o / "report.json").write_text(json.dumps(tree, ensure_ascii=False, indent=1),
+                                           encoding="utf-8")
+            if not args.quiet:
+                print("report -> %s" % (o / "report.json"))
+        if args.json:
+            print(json.dumps(tree, ensure_ascii=False, indent=1))
+        elif not args.quiet:
+            print_tree_report(tree)
+        return 0
+
+    if not args.target:
+        print("give me a file to inspect, or --scan DIR for a whole directory", file=sys.stderr)
+        return 2
+
+    report = build_report_with_unpack(path, Path(args.out) if args.out else None, args.unpack)
     if args.out:
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)
