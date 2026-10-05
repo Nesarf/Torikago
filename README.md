@@ -55,6 +55,7 @@ Three things this tool therefore does **not** claim:
 | **Embedded images** | PE files inside the file, located by header, offered for carving. |
 | **Unpack (in-process)** | `--unpack` calls [Nanodesu!](https://github.com/Nesarf/Nanodesu) as a module — no subprocess, no shell — to actually unpack a PyInstaller archive, then triages the executables it produced. Set `NANODESU_PATH` if it is not in a known location. |
 | **Batch scan** | `--scan DIR` triages every file in a directory and reports only the ones that stand out, ranked. On a real 200-file Python distribution it reports **0**; on a file carrying the injection triad it reports that file first. |
+| **Debug information** | Reads the PE debug directory, and a `.pdb` beside the binary when one shipped. The CodeView record names the `.pdb`'s **absolute path on the build machine** — project, source layout, build configuration — with no second file needed. A shipped `.pdb` yields type names, method names and source paths. The two are matched by GUID, and a match that cannot be established is reported as *unverified* rather than as a mismatch |
 | **Verdict** | `--scan-av` asks ClamAV; `--feed misp\|stix\|both` writes an importable MISP event and/or a STIX 2.1 bundle. |
 | **Report** | `report.json` (machine-readable), a human summary, and `rule.yar` labelled `UNREVIEWED`. |
 
