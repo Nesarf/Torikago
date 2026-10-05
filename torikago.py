@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.6.0"
+_SOURCE_VERSION = "1.6.1"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -2626,6 +2626,12 @@ def main(argv=None) -> int:
             print("  nothing to flag")
         print()
         print(state["note"])
+        print()
+        # The boundary travels with the result in the data; it is printed here too, because the
+        # reader of a console report is exactly who would otherwise take it as reassurance.
+        print("boundary")
+        for line in state.get("boundary_notice", []):
+            print("  - %s" % line)
         return 0
 
     if args.corpus_write or args.corpus_check:

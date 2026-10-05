@@ -41,6 +41,30 @@ import subprocess
 from pathlib import Path
 
 
+# --------------------------------------------------------------------------- #
+# The boundary
+#
+# Modelled on the same idea as the Tor/Firefox auditor: the notice travels verbatim with EVERY
+# result, error paths included, because the failure mode it guards against is a reader taking a
+# clean report as a statement about safety.
+#
+# A static audit can say what is configured. It cannot say what will happen.
+# --------------------------------------------------------------------------- #
+
+BOUNDARY_NOTICE = [
+    "This tool performs a static audit only: it reads configuration and state, never launches a "
+    "scanner, never changes a setting, and never touches the network.",
+    "It does NOT address: whether protection actually detects anything. Real-time interception, "
+    "behavioural blocking and kernel-level defence are not observable from here, and a product "
+    "reporting itself active is not evidence that it is effective.",
+    "It reports [registration, state flags, exclusions, and detection history]. It is NOT an "
+    "antivirus, a firewall, or a replacement for either.",
+    "A clean audit is NOT proof of safety. Treating it as one is a misuse. In particular, an "
+    "empty exclusion list does not mean nothing is excluded, and a product listed as enabled "
+    "does not mean it is watching.",
+]
+
+
 def _powershell(script: str, timeout: int = 120) -> tuple:
     """(ok, output). Console encoding forced to UTF-8 first: product names arrive in the system code
     page otherwise, and a garbled name is a wrong answer about which engine is watching."""
@@ -72,13 +96,13 @@ def defender_status() -> dict:
     result = {"ok": ok}
     if not ok:
         result["reason"] = out
-        return result
+        return _with_boundary(result)
     for line in out.splitlines():
         line = line.strip()
         if "=" in line:
             k, v = line.split("=", 1)
             result[k.strip()] = v.strip()
-    return result
+    return _with_boundary(result)
 
 
 def registered_products() -> dict:
@@ -93,7 +117,7 @@ def registered_products() -> dict:
     result = {"ok": ok, "products": [], "third_party": []}
     if not ok:
         result["reason"] = out
-        return result
+        return _with_boundary(result)
     for line in out.splitlines():
         line = line.strip()
         if not line.startswith("product="):
@@ -103,7 +127,7 @@ def registered_products() -> dict:
         result["products"].append({"name": name, "state": state})
         if "defender" not in name.lower():
             result["third_party"].append(name)
-    return result
+    return _with_boundary(result)
 
 
 def exclusions() -> dict:
@@ -123,7 +147,7 @@ def exclusions() -> dict:
     result = {"ok": ok, "paths": [], "extensions": [], "processes": []}
     if not ok:
         result["reason"] = out
-        return result
+        return _with_boundary(result)
     for line in out.splitlines():
         line = line.strip()
         if line.startswith("path="):
@@ -132,7 +156,7 @@ def exclusions() -> dict:
             result["extensions"].append(line[4:])
         elif line.startswith("proc="):
             result["processes"].append(line[5:])
-    return result
+    return _with_boundary(result)
 
 
 def recent_detections(limit: int = 10) -> dict:
@@ -149,12 +173,25 @@ def recent_detections(limit: int = 10) -> dict:
     result = {"ok": ok, "detections": []}
     if not ok:
         result["reason"] = out
-        return result
+        return _with_boundary(result)
     for line in out.splitlines():
         line = line.strip()
         if "|" in line:
             when, _, what = line.partition("|")
             result["detections"].append({"at": when, "resources": what})
+    return _with_boundary(result)
+
+
+def _with_boundary(result: dict) -> dict:
+    """Attach the notice to a result. Applied to every path, including failures.
+
+    Wrapped rather than remembered: the first version attached it in one place, and a reader who
+    takes an error result as a clean one gets exactly the false assurance the notice exists to
+    prevent.
+    """
+    if isinstance(result, dict):
+        result = dict(result)
+        result["boundary_notice"] = BOUNDARY_NOTICE
     return result
 
 
@@ -165,7 +202,7 @@ def posture() -> dict:
     nothing about where anybody keeps samples; a tool that knows the path to a malware collection is
     a tool that leaks it. The vault check lives beside the vault.
     """
-    return {
+    return _with_boundary({
         "defender": defender_status(),
         "registered": registered_products(),
         "exclusions": exclusions(),
@@ -173,7 +210,7 @@ def posture() -> dict:
         "read_only": True,
         "note": ("Nothing here changes a setting. This reports what is protecting the machine and "
                  "where it conflicts with itself; it does not alter any of it."),
-    }
+    })
 
 
 def findings(state: dict) -> list:

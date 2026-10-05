@@ -142,3 +142,53 @@ class TestItKnowsNothingAboutSampleLocations(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestTheBoundaryNoticeTravelsWithEveryResult(unittest.TestCase):
+    """The failure this guards against is a reader taking a clean report as a statement about safety.
+
+    Modelled on the Tor/Firefox auditor's rule: the notice travels verbatim with EVERY result,
+    error paths included. Attached in one place it would be missing from exactly the results a
+    careless reader is most likely to over-read.
+    """
+
+    def test_the_posture_object_carries_it(self):
+        self.assertIn("boundary_notice", sp.posture())
+
+    def test_every_sub_query_carries_it(self):
+        for fn in (sp.defender_status, sp.registered_products, sp.exclusions,
+                   sp.recent_detections):
+            with self.subTest(fn=fn.__name__):
+                self.assertIn("boundary_notice", fn())
+
+    def test_an_error_path_carries_it_too(self):
+        """Forced by pretending the platform cannot answer, which is the real failure shape."""
+        real = sp.os.name
+        sp.os.name = "posix"
+        try:
+            result = sp.defender_status()
+        finally:
+            sp.os.name = real
+        self.assertFalse(result["ok"])
+        self.assertIn("boundary_notice", result,
+                      "the error path dropped the notice, so a failure could read as reassurance")
+
+    def test_it_says_what_it_cannot_address(self):
+        text = " ".join(sp.BOUNDARY_NOTICE).lower()
+        self.assertIn("does not address", text)
+        self.assertIn("not an antivirus", text)
+
+    def test_it_says_a_clean_audit_is_not_proof_of_safety(self):
+        text = " ".join(sp.BOUNDARY_NOTICE)
+        self.assertIn("NOT proof of safety", text)
+
+    def test_it_names_the_specific_over_readings(self):
+        """Vague caveats get skimmed; these name the two things a reader would otherwise assume."""
+        text = " ".join(sp.BOUNDARY_NOTICE).lower()
+        self.assertIn("empty exclusion list", text)
+        self.assertIn("does not mean it is watching", text)
+
+    def test_the_notice_is_a_list_of_lines_not_one_blob(self):
+        """Separate lines survive rendering as separate points; one paragraph gets skimmed."""
+        self.assertIsInstance(sp.BOUNDARY_NOTICE, list)
+        self.assertGreaterEqual(len(sp.BOUNDARY_NOTICE), 4)
