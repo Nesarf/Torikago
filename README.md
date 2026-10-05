@@ -286,6 +286,22 @@ refusal is a specific way this goes wrong: **a sample in a repository gets commi
 one on the system drive survives a machine being handed on. The default destination is described in
 the tool as **a suggestion rather than an assumption** — it has no idea where you keep samples.
 
+## Handling what you take
+
+**A sealed artifact is inert** — an AES-encrypted zip, nothing double-clicks into execution. The
+residual risk is what happens at the moment somebody unseals one to look at it, and
+[`WORKFLOW_ISOLATED.md`](WORKFLOW_ISOLATED.md) is the procedure for that: which isolation is actually
+disposable, how to take the network away **before** unsealing, what to run, and why the sandbox is
+**discarded rather than cleaned**.
+
+**The tools are portable by design**, which is what makes it practical: **~316 KB of Python, standard
+library only**, with `pyzipper` as the single exception for real AES. Nothing needs an installer.
+
+Two things in that document deliberately name the tempting mistakes rather than assuming they will be
+avoided: **a sandbox with network lets the sample phone home** — and for the families in these
+collections a RAT's entire function is reaching a command server — and **WSL is not an isolation
+boundary**, because it shares the host filesystem and network.
+
 ## Signals are graded, and the grading is the point
 
 An import is not a verdict. `IsDebuggerPresent` is how CPython implements `sys.gettrace`;
