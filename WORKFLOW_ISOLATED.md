@@ -45,9 +45,25 @@ sealed form already handles. What needs isolation is the unsealing.
 **The table above is generic. This machine's actual situation is narrower:**
 
 * **Windows 11 Home, build 26200.** `Get-WindowsOptionalFeature -Online -FeatureName
-  Containers-DisposableClientVM` returns **nothing at all** — not an error, not a state. On Home the
-  feature does not exist, so there is nothing to enable and no reboot that would help. **Windows
-  Sandbox and Hyper-V are both unavailable for that reason**, not for a lack of privilege.
+  Containers-DisposableClientVM` returns **nothing at all**, and `dism /online /get-featureinfo`
+  confirms why:
+
+      Error: 0x800f080c
+      Feature name Containers-DisposableClientVM is unknown.
+
+  **Not a privilege problem** — `IsInRole('Administrators')` is `True`. The feature does not exist on
+  this edition, so there is nothing to enable and no reboot that would help. **Windows Sandbox and
+  Hyper-V are both unavailable for that reason.**
+
+  **Read the edition from `EditionId`, not `ProductName`.** `Get-ComputerInfo` reports
+  `WindowsProductName: Windows 10 Home` alongside `BuildNumber: 26200`, which is Windows 11 — the
+  `ProductName` registry key was not updated for 11 and is wrong on most 11 machines. `EditionId:
+  Core` is the authoritative field, and `Core` means Home.
+
+  **`VirtualizationFirmwareEnabled: False` is not a problem here**, though it looks like one.
+  `HyperVisorPresent` is `True` at the same time, which is the normal pair: Windows' own hypervisor is
+  already running, so the firmware-level question answers false. **WSL2 running a distro is the
+  proof that virtualisation works.**
 * **Virtualisation itself is fine**: `HypervisorPresent: True`, and WSL2 runs a distro
   (`wsl --status` → version 2). So the hardware and the platform are capable; only the
   disposable-Windows component is missing.
