@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torikago"
-version = "1.3.0"
+version = "1.3.1"
 description = "Static triage for an unknown executable: identify, unpack, extract indicators. Never executes the target."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -31,4 +31,9 @@ pyinstaller = ["nanodesu>=1.2,<2"]
 torikago = "torikago:main"
 
 [tool.setuptools]
-py-modules = ["torikago"]
+# Both modules, not just the one named after the project. `unpack.py` was missing from the
+# published 1.3.0 wheel, so `--unpack` could not work at all for anyone who installed it:
+# the module the flag delegates to simply was not there. Found by installing from PyPI and
+# importing, which is the only check that would have caught it -- the local tree has the
+# file, so every local test passed.
+py-modules = ["torikago", "unpack"]
