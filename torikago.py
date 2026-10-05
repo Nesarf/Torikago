@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.4.0"
+_SOURCE_VERSION = "1.5.0"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -1460,11 +1460,21 @@ def find_inner_executables(root: Path, limit: int = 40) -> list:
     return out[:limit]
 
 
-def scan_tree(root: Path, *, limit: int = 200) -> dict:
-    """Torikago every file in a directory: the answer to 'which of these is worth my time?'."""
+def scan_tree(root: Path, *, limit: int = 200, only=None) -> dict:
+    """Torikago every file in a directory: the answer to 'which of these is worth my time?'.
+
+    `only` restricts the walk to a set of lower-case extensions without the dot, which a corpus build
+    needs: scanning a drive unfiltered mostly finds archives and images, and a manifest full of those
+    says nothing about the detectors. Observed: 1,496 files with exactly *one* PE among them.
+    """
+    want = {e.lower().lstrip(".") for e in only} if only else None
     rows = []
+    considered = 0
     for p in sorted(root.rglob("*")):
         if not p.is_file():
+            continue
+        considered += 1
+        if want is not None and p.suffix.lower().lstrip(".") not in want:
             continue
         try:
             with p.open("rb") as fh:
@@ -2546,6 +2556,19 @@ def main(argv=None) -> int:
                     help="also unpack a recognised wrapper in-process (never executes it)")
     ap.add_argument("--scan", metavar="DIR",
                     help="triage every file in a directory and report which ones stand out")
+    ap.add_argument("--corpus-write", metavar="DIR",
+                    help="scan a directory and fold the measurements into corpus/manifest.jsonl "
+                         "(structure only; no samples are copied or stored)")
+    ap.add_argument("--corpus-file", metavar="PATH",
+                    help="manifest to read and write with --corpus-write "
+                         "(default: DIR/manifest.jsonl)")
+    ap.add_argument("--corpus-check", metavar="PATH",
+                    help="load a manifest and report what it holds")
+    ap.add_argument("--scan-limit", type=int, default=200, metavar="N",
+                    help="with --scan/--corpus-write, analyse at most N files (default 200)")
+    ap.add_argument("--scan-only", metavar="EXT,EXT",
+                    help="with --scan/--corpus-write, only look at these extensions "
+                         "(e.g. exe,dll); a corpus of archives says nothing about the detectors")
     ap.add_argument("--scan-av", action="store_true",
                     help="also ask ClamAV for a verdict (reads files, never runs them)")
     ap.add_argument("--handoff", choices=("defender", "clamav", "both"),
@@ -2565,6 +2588,81 @@ def main(argv=None) -> int:
 
     if args.quarantine_list:
         return list_quarantine(Path(args.quarantine_list))
+
+    if args.corpus_write or args.corpus_check:
+        import corpus as corpus_mod
+
+        if args.corpus_check:
+            path = Path(args.corpus_check)
+            if not path.is_file():
+                print("no such manifest: %s" % path, file=sys.stderr)
+                return 1
+            entries = corpus_mod.read_manifest(path)
+            stats = corpus_mod.summarize(entries)
+            if args.json:
+                print(json.dumps(stats, ensure_ascii=False, indent=1))
+                return 0
+            print("%s" % path)
+            print("  files        : %d" % stats["files"])
+            print("  attention    : %d" % stats["attention"])
+            print("  by packer    : %s" % ", ".join(
+                "%s=%d" % kv for kv in sorted(stats["packer"].items(),
+                                              key=lambda kv: -kv[1])[:6]))
+            print("  by kind      : %s" % ", ".join(
+                "%s=%d" % kv for kv in sorted(stats["kind"].items(), key=lambda kv: -kv[1])[:6]))
+            return 0
+
+        root = Path(args.corpus_write)
+        if not root.is_dir():
+            print("not a directory: %s" % root, file=sys.stderr)
+            return 1
+        manifest_path = Path(args.corpus_file) if args.corpus_file \
+            else root / corpus_mod.MANIFEST_NAME
+        before = corpus_mod.read_manifest(manifest_path)
+
+        # scan_tree caps how many files it walks (its own default is a guard against being pointed at
+        # a whole drive by accident). A corpus build wants the whole sample, so the cap is explicit
+        # and adjustable -- the first run silently stopped at 200 of 1232 candidates.
+        only = None
+        if args.scan_only:
+            only = [e.strip() for e in args.scan_only.split(",") if e.strip()]
+            print("filtering to: %s" % ", ".join(only))
+        tree = scan_tree(root, limit=args.scan_limit, only=only)
+        entries, skipped = [], []
+        for row in tree.get("rows", []):
+            # `scan_tree` rows carry a relative path; the hash has to come from the file itself.
+            full = root / row["path"]
+            if not full.is_file():
+                continue
+            # The manifest must not measure itself. Left in, the first run adds it and every later
+            # run adds a *new* entry for the file that just changed, so the corpus grows by one
+            # spurious record per sweep -- observed: 3 files became 4 on the second pass.
+            if full.resolve() == manifest_path.resolve():
+                skipped.append(row["path"])
+                continue
+            entries.append(corpus_mod.entry_from_row(
+                row, sha=corpus_mod.sha256_file(full)))
+
+        merged = corpus_mod.merge_manifest(before, entries)
+        corpus_mod.write_manifest(manifest_path, merged["entries"])
+
+        print("scanned  : %d file(s)" % tree.get("scanned", 0))
+        if skipped:
+            print("skipped  : %s (the manifest does not measure itself)" % ", ".join(skipped))
+        print("manifest : %s" % manifest_path)
+        print("  added   : %d" % len(merged["added"]))
+        print("  updated : %d" % len(merged["updated"]))
+        print("  total   : %d" % len(merged["entries"]))
+        if merged["changed"]:
+            # Printed rather than filed away: a verdict that moved is the thing a corpus is kept to
+            # notice, and burying it in a JSON file nobody opens would waste the whole exercise.
+            print("  verdict changes since the last run:")
+            for c in merged["changed"][:15]:
+                print("     %s  %s: %r -> %r"
+                      % (c["sha256"][:12], c["field"], c["was"], c["now"]))
+            if len(merged["changed"]) > 15:
+                print("     ... and %d more" % (len(merged["changed"]) - 15))
+        return 0
 
     if args.scan:
         # --scan stands alone: no positional file is needed. Checked before anything else
