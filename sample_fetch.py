@@ -318,13 +318,25 @@ def main(argv=None) -> int:
                          "(metadata only, never downloads)")
     ap.add_argument("--quota", action="store_true",
                     help="with --source malshare: report the key's remaining daily requests")
-    ap.add_argument("--auth-key", default=os.environ.get("MALWAREBAZAAR_AUTH_KEY"),
-                    help="abuse.ch Auth-Key (or set MALWAREBAZAAR_AUTH_KEY). Required by the "
-                         "endpoint since it moved behind auth; never stored next to samples")
+    ap.add_argument("--recent", action="store_true",
+                    help="with --source malshare: list hashes added in the last 24 hours "
+                         "(metadata only)")
+    # The default follows the provider. Reading MALWAREBAZAAR_AUTH_KEY while talking to MalShare sent
+    # the wrong credential to the wrong service -- surfaced as a bare HTTP 400 from MalShare rather
+    # than as anything pointing at the cause.
+    default_key = (os.environ.get("MALSHARE_TOKEN") if os.environ.get("_SAMPLE_SOURCE") == "malshare"
+                   else os.environ.get("MALWAREBAZAAR_AUTH_KEY"))
+    ap.add_argument("--auth-key", default=None,
+                    help="API key for the chosen provider. Defaults to MALWAREBAZAAR_AUTH_KEY for "
+                         "abuse.ch and MALSHARE_TOKEN for MalShare; never stored next to samples")
     ap.add_argument("--log", default=r"E:\Quarantine\fetch\fetches.jsonl")
     ap.add_argument("--limit", type=int, default=20,
                     help="rows to list with --tag (default 20)")
     args = ap.parse_args(argv)
+
+    if not args.auth_key:
+        args.auth_key = (os.environ.get("MALSHARE_TOKEN") if args.source == "malshare"
+                         else os.environ.get("MALWAREBAZAAR_AUTH_KEY"))
 
     dest = Path(args.dest)
     # Everything checkable is checked before anything is fetched. The destination first, then the
@@ -346,6 +358,24 @@ def main(argv=None) -> int:
         print("malshare quota: %s" % q.get("raw"))
         if "remaining" in q:
             print("  allocated %s, remaining %s" % (q.get("allocated"), q.get("remaining")))
+        return 0
+
+    if args.recent:
+        import provider_malshare as ms
+        key = ms.find_auth_key(args.auth_key)
+        if not key:
+            print("failed: --recent needs MALSHARE_TOKEN (or --auth-key)")
+            return 1
+        d = ms.recent(key, limit=args.limit)
+        if not d.get("ok"):
+            print("failed: %s" % d.get("reason"))
+            return 1
+        print("MalShare, last 24 hours: %s hash(es)" % d.get("count"))
+        for row in (d.get("samples") or [])[:args.limit]:
+            print("  %s" % (row.get("sha256") if isinstance(row, dict) else row))
+        print()
+        print("This feed is dominated by ELF and Mach-O. Measured on 2026-10-05: 24 samples, zero")
+        print("PE -- so for Windows work it is a bulk source, not a targeted one.")
         return 0
 
     if args.tag:

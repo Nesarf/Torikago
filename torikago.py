@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.10.0"
+_SOURCE_VERSION = "1.11.0"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -2564,12 +2564,22 @@ def main(argv=None) -> int:
                          "(default: DIR/manifest.jsonl)")
     ap.add_argument("--corpus-check", metavar="PATH",
                     help="load a manifest and report what it holds")
-    ap.add_argument("--fetch-sample", metavar="HASH",
+    ap.add_argument("--fetch-sample", metavar="HASH", nargs="?", const="",
                     help="look a sample hash up in MalwareBazaar and report the metadata. Bytes are "
                          "opt-in with --fetch-bytes. Needs an abuse.ch Auth-Key")
     ap.add_argument("--fetch-bytes", action="store_true",
                     help="with --fetch-sample, actually download. Metadata cannot execute and is "
                          "usually enough to decide whether the sample is worth having")
+    ap.add_argument("--tag", metavar="TAG",
+                    help="list what MalwareBazaar holds under a tag; never downloads")
+    ap.add_argument("--recent", action="store_true",
+                    help="with --source malshare, list hashes from the last 24 hours")
+    ap.add_argument("--quota", action="store_true",
+                    help="with --source malshare, report the key's remaining requests")
+    ap.add_argument("--source", choices=("malwarebazaar", "malshare"),
+                    help="which collection to ask (default malwarebazaar)")
+    ap.add_argument("--limit", type=int, metavar="N",
+                    help="rows to list with --tag or --recent (default 20)")
     ap.add_argument("--vault-store", metavar="FILE",
                     help="seal a file into the vault as an AES-encrypted zip, so an active "
                          "antivirus cannot delete the evidence")
@@ -2677,14 +2687,30 @@ def main(argv=None) -> int:
             print("  - %s" % line)
         return 0
 
-    if args.fetch_sample:
+    if args.fetch_sample is not None or args.tag or args.recent or args.quota:
         import sample_fetch as sf
 
-        argv = [args.fetch_sample]
+        # Built as argv rather than by calling the functions directly, so there is one parser and
+        # one set of defaults. A second way in would be a second place for the destination checks to
+        # be forgotten.
+        argv = []
+        if args.fetch_sample:
+            argv.append(args.fetch_sample)
         if args.fetch_bytes:
             argv.append("--fetch")
-        if args.dest:
-            argv += ["--dest", args.dest]
+        for flag, value in (("--tag", args.tag), ("--source", args.source),
+                            ("--dest", args.dest)):
+            if value:
+                argv += [flag, value]
+        for flag, on in (("--recent", args.recent), ("--quota", args.quota)):
+            if on:
+                argv.append(flag)
+        if args.limit:
+            argv += ["--limit", str(args.limit)]
+        if not argv:
+            print("--fetch-sample needs a hash, or use --tag / --recent / --quota to browse",
+                  file=sys.stderr)
+            return 1
         return sf.main(argv)
 
     if args.vault_store or args.vault_list is not None or args.vault_extract:

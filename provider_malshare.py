@@ -17,6 +17,25 @@ Nothing here weakens what `sample_fetch` already enforces. The destination check
 validation, the metadata-first default and the protection-state recording all happen **before** a
 provider is consulted, so adding a provider cannot route around them.
 
+## What it turned out to be good for, measured
+
+The first assumption was that a second provider fills the first one's blind spot. Measured on
+2026-10-05, that is **not true for Windows work**: MalShare's recent feed was **24 samples, zero PE** --
+dominated by ELF (9) and Mach-O (3), with the rest ASCII, AppleScript, archives and documents. Filtering
+by type for `PE32`, `PE32+`, `exe` or `dll` returned nothing, which for a 24-hour window means there was
+nothing rather than that the filter failed.
+
+So the two providers are good at different things, and the difference is the reason both are kept:
+
+* **MalwareBazaar is the targeted one** -- indexed by family and by tag, which is how 20 PyInstaller
+  samples were found when a tag was asked for.
+* **MalShare is the bulk one** -- much larger, a daily firehose, and a type filter that makes sense over
+  a longer window than a day.
+
+**A conclusion worth keeping: a source being large is not the same as a source being relevant.** For a
+Windows unpacker, the smaller, better-indexed collection is the more useful one -- and an assumption
+about complementarity is worth one measurement before it is written down as a design rationale.
+
 ## What it does not do
 
 It does not download by default, does not treat a provider's answer as a verdict, and does not
@@ -59,15 +78,23 @@ def quota(api_key: str) -> dict:
         raw = _call({"api_key": api_key, "action": "getlimit"}).decode("utf-8", "replace").strip()
     except (urllib.error.URLError, OSError) as exc:
         return {"ok": False, "reason": str(exc)}
-    # The endpoint returns two numbers: allocated, and remaining.
-    parts = raw.replace(",", " ").split()
     out = {"ok": True, "raw": raw}
-    if len(parts) >= 2:
-        try:
-            out["allocated"] = int(parts[0])
-            out["remaining"] = int(parts[1])
-        except ValueError:
-            pass
+    # Measured, not assumed: the endpoint returns JSON ({"LIMIT":2000,"REMAINING":2000}), while an
+    # earlier version parsed it as two space-separated numbers and silently reported neither.
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            for key, label in (("LIMIT", "allocated"), ("REMAINING", "remaining")):
+                for k, v in parsed.items():
+                    if k.upper() == key:
+                        out[label] = int(v)
+    except (ValueError, TypeError):
+        parts = raw.replace(",", " ").split()
+        if len(parts) >= 2:
+            try:
+                out["allocated"], out["remaining"] = int(parts[0]), int(parts[1])
+            except ValueError:
+                pass
     return out
 
 

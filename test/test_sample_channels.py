@@ -336,3 +336,68 @@ class TestTheSecondProviderFollowsTheSameRules(unittest.TestCase):
         self.assertLess(src.index("check_destination"),
                         src.index("provider_malshare"),
                         "the destination check moved after the provider is reached")
+
+
+class TestTheKeyFollowsTheProvider(unittest.TestCase):
+    """Observed: `--source malshare` sent the abuse.ch key to MalShare and got a bare HTTP 400.
+
+    The wrong credential went to the wrong service and the error said nothing about why, which is the
+    same class of failure as reporting a missing key when a key was refused.
+    """
+
+    def test_each_provider_reads_its_own_variable(self):
+        src = (HERE.parent / "sample_fetch.py").read_text(encoding="utf-8")
+        self.assertIn("MALSHARE_TOKEN", src)
+        self.assertIn("MALWAREBAZAAR_AUTH_KEY", src)
+        flat = " ".join(src.split())
+        self.assertIn('args.source == "malshare"', flat,
+                      "the key is not chosen by provider")
+
+    def test_the_provider_choice_comes_before_the_key_is_read(self):
+        """Ordering matters: the key default depends on which collection was asked for.
+
+        Searched from the resolution rather than from the first mention. `MALSHARE_TOKEN` also appears
+        in the argparse block, which is earlier in the function but not where the reading happens --
+        so an index comparison against the first occurrence failed on the definitions.
+        """
+        src = (HERE.parent / "sample_fetch.py").read_text(encoding="utf-8")
+        i = src.index("if not args.auth_key:")
+        window = src[i:i + 300]
+        self.assertIn("args.source", window,
+                      "the key is resolved without consulting which provider was asked for")
+
+
+class TestQuotaParsingWasMeasured(unittest.TestCase):
+    """MalShare returns JSON; an earlier version parsed space-separated numbers and reported
+    neither -- so `--quota` printed the raw blob and no figures."""
+
+    def test_it_parses_the_json_shape_malshare_returns(self):
+        import provider_malshare as ms
+        src = (HERE.parent / "provider_malshare.py").read_text(encoding="utf-8")
+        self.assertIn('"LIMIT"', src)
+        self.assertIn('"REMAINING"', src)
+
+    def test_the_measurement_is_recorded(self):
+        src = (HERE.parent / "provider_malshare.py").read_text(encoding="utf-8")
+        flat = " ".join(src.split())
+        self.assertIn("Measured, not assumed", flat)
+
+
+class TestTheTwoProvidersAreGoodAtDifferentThings(unittest.TestCase):
+    """The measurement that corrected the design rationale."""
+
+    def test_the_module_records_that_malshare_had_no_pe(self):
+        """The assumption was that a second provider fills the first's blind spot. For Windows work
+        it does not: MalShare's recent feed was 24 samples with zero PE."""
+        src = (HERE.parent / "provider_malshare.py").read_text(encoding="utf-8")
+        flat = " ".join(src.split())
+        self.assertIn("24 samples, zero PE", flat)
+        # The docstring wraps, so the phrase is split across lines in the file. Normalised rather
+        # than quoted exactly, which is the difference between checking the sentence and checking
+        # the line breaks.
+        self.assertIn("being large is not the same as a source being relevant", flat)
+
+    def test_the_recent_listing_says_it_is_not_a_targeted_source(self):
+        import inspect
+        src = inspect.getsource(sf.main)
+        self.assertIn("bulk source, not a targeted one", " ".join(src.split()))
