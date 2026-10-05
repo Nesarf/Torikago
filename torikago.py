@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.6.1"
+_SOURCE_VERSION = "1.7.0"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -2617,6 +2617,26 @@ def main(argv=None) -> int:
         for label, key in (("paths", "paths"), ("extensions", "extensions"),
                            ("processes", "processes")):
             print("  %-11s %s" % (label, ", ".join(ex.get(key, [])) or "(none)"))
+        print()
+        ra = state.get("registration_audit") or {}
+        if ra.get("ok"):
+            print()
+            print("declared vs observed  <- the registration is self-declared and nothing verifies it")
+            for prod in ra.get("products", []):
+                print("  %s" % prod["name"])
+                print("     productState %#07x   declares real-time: %s"
+                      % (prod.get("product_state") or 0, prod.get("declares_realtime")))
+                svc = prod.get("observed_service") or {}
+                print("     running service: %s" % (svc.get("matched") or "none matched"))
+            for c in ra.get("contradictions") or []:
+                print("  [CONTRA] %s: %s" % (c["product"], c["what"]))
+            for o in ra.get("observations") or []:
+                print("  [note]   %s: %s" % (o["product"], o["what"]))
+            if not ra.get("contradictions") and not ra.get("observations"):
+                print("  no contradiction found -- which means nothing, see the limits below")
+            for limit in (ra.get("limits") or [])[:1]:
+                print("  %s" % limit)
+
         print()
         print("findings")
         found = sp.findings(state)

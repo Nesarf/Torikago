@@ -195,6 +195,22 @@ def _with_boundary(result: dict) -> dict:
     return result
 
 
+def registration_audit() -> dict:
+    """Contradictions between what registered products declare and what can be observed.
+
+    Kept in its own module because it is the one part of this report that looks for something
+    actively wrong rather than merely describing a state. It carries its own limits, and its own
+    asymmetry: a contradiction means something, its absence means nothing.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import product_registration as pr
+    except ImportError as exc:
+        return {"ok": False, "reason": "product_registration is unavailable: %s" % exc}
+    return _with_boundary(pr.audit_registrations())
+
+
 def posture() -> dict:
     """Everything above, in one object. Read-only: no setting is written by any of it.
 
@@ -207,6 +223,7 @@ def posture() -> dict:
         "registered": registered_products(),
         "exclusions": exclusions(),
         "detections": recent_detections(),
+        "registration_audit": registration_audit(),
         "read_only": True,
         "note": ("Nothing here changes a setting. This reports what is protecting the machine and "
                  "where it conflicts with itself; it does not alter any of it."),
