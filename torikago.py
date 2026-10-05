@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.7.1"
+_SOURCE_VERSION = "1.8.0"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -2564,6 +2564,11 @@ def main(argv=None) -> int:
                          "(default: DIR/manifest.jsonl)")
     ap.add_argument("--corpus-check", metavar="PATH",
                     help="load a manifest and report what it holds")
+    ap.add_argument("--corpus-verify", metavar="PATH",
+                    help="re-measure --corpus-root and report how the verdicts differ from the "
+                         "manifest. Reports differences; does not judge them")
+    ap.add_argument("--corpus-root", metavar="DIR",
+                    help="the tree a manifest describes, for --corpus-verify")
     ap.add_argument("--posture", action="store_true",
                     help="read-only report on what is protecting this machine and where it "
                          "conflicts with itself. Writes no setting")
@@ -2652,6 +2657,27 @@ def main(argv=None) -> int:
         print("boundary")
         for line in state.get("boundary_notice", []):
             print("  - %s" % line)
+        return 0
+
+    if args.corpus_verify:
+        if not args.corpus_root:
+            print("--corpus-verify needs --corpus-root DIR (the tree the manifest describes)",
+                  file=sys.stderr)
+            return 1
+        import corpus_verify as cv
+
+        only = None
+        if args.scan_only:
+            only = [e.strip() for e in args.scan_only.split(",") if e.strip()]
+        result = cv.verify(Path(args.corpus_verify), Path(args.corpus_root), only=only,
+                           limit=args.scan_limit)
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=1))
+            return 0
+        print(cv.summarise(result))
+        print()
+        for limit in result["limits"]:
+            print("  - %s" % limit)
         return 0
 
     if args.corpus_write or args.corpus_check:

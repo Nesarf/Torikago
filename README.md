@@ -104,6 +104,7 @@ python torikago.py --posture                      # what is protecting this mach
 python torikago.py --scan ./downloads --scan-only exe,dll --scan-limit 500
 python torikago.py --corpus-write ./downloads --corpus-file corpus/manifest.jsonl
 python torikago.py --corpus-check corpus/manifest.jsonl
+python torikago.py --corpus-verify corpus/manifest.jsonl --corpus-root /d
 ```
 
 Every flag above is listed on purpose. Three of them shipped for several versions with no mention
@@ -219,6 +220,31 @@ mean it is watching.
 
 Error paths included, deliberately: a failed query returning an empty list looks a great deal like
 "nothing found", and that is exactly when the notice matters most.
+
+### Is a detector change safe? `--corpus-verify`
+
+```bash
+python torikago.py --corpus-verify corpus/manifest.jsonl --corpus-root /d --scan-only exe,dll
+```
+
+Re-measures a tree and reports how the verdicts differ from the manifest. **It reports differences; it
+does not judge them** — a change caused by a detector edit is *expected*, and a change nobody expected
+is a bug. **Software cannot tell those apart, so it does not try.** The output says so every time.
+
+This closes the gap that made the corpus a pile rather than an instrument: `corpus/manifest.jsonl`
+holds **1,161 measurements of real installed software**, and until this existed the only thing reading
+it was a test suite exercising the data structures with synthetic input. A detector edit could have
+changed verdicts on a thousand real files and the only way to learn that was to remember to re-sweep a
+drive by hand.
+
+That matters more here than in most projects, because **every false positive this tool has found came
+from a real file and none from a fixture** — .NET entropy, version strings parsed as IPs, random code
+matching at a sector boundary, data-only modules called packed. Fixtures replay known regressions; they
+cannot find a new class. **An instrument nothing reads is a pile.**
+
+**It cannot measure false negatives.** The corpus holds legitimate software, so it can show that a
+detector still does not cry wolf; it says nothing about what a detector would miss. That needs samples
+this corpus deliberately does not contain.
 
 ## Signals are graded, and the grading is the point
 

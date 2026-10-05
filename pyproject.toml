@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torikago"
-version = "1.7.1"
+version = "1.8.0"
 description = "Static triage for an unknown executable: identify, unpack, extract indicators. Never executes the target."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -45,4 +45,4 @@ Changelog = "https://github.com/Nesarf/Torikago/releases"
 # the module the flag delegates to simply was not there. Found by installing from PyPI and
 # importing, which is the only check that would have caught it -- the local tree has the
 # file, so every local test passed.
-py-modules = ["torikago", "unpack", "corpus", "security_posture", "product_registration"]
+py-modules = ["torikago", "unpack", "corpus", "corpus_verify", "security_posture", "product_registration"]
