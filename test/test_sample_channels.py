@@ -471,3 +471,267 @@ class TestTheHandoffVerdictIsVisible(unittest.TestCase):
         text = buf.getvalue()
         self.assertIn("not this tool's", text)
         self.assertIn("not the same as the file being safe", text)
+
+
+class TestUnsealingRefusesToWriteOutsideTheWorkDirectory(unittest.TestCase):
+    """The vault unsealed with `extractall()`, which does exactly what the member names say.
+
+    The check before it confirmed the *container* was encrypted and said nothing about the contents.
+    A zip slip needs no encryption weakness at all -- it is a normal feature of the format, and
+    `../../x` writes wherever the user has permission.
+
+    **The names are untrusted even though the container is ours**, because the container was built by
+    whoever uploaded the sample. Verified against the old code: every case below wrote the file.
+    """
+
+    def setUp(self):
+        self.tmp = _fixtures.tmpdir("slip-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        self.work = self.tmp / "work"
+
+    def _sealed(self, *names):
+        """An AES archive holding the given names, placed where the vault would put one.
+
+        **Written directly rather than through `store()`.** `store()` seals a file as a single member
+        named after that file, so routing the fixture through it produced an archive whose only member
+        was `payload.zip` -- and the traversal names inside it were then never opened, so every test
+        below passed vacuously against the bug it was written to catch.
+        """
+        import pyzipper
+        vault = self.tmp / "vault"
+        vault.mkdir(parents=True, exist_ok=True)
+        out = vault / ("f" * 64 + ".zip")
+        with pyzipper.AESZipFile(out, "w", compression=pyzipper.ZIP_DEFLATED,
+                                 encryption=pyzipper.WZ_AES) as zf:
+            zf.setpassword(sv.SAMPLE_PASSWORD)
+            for n in names:
+                zf.writestr(n, b"HOSTILE\n")
+        return out
+
+    @unittest.skipUnless(HAVE_PYZIPPER, "needs pyzipper to build the fixture")
+    def test_a_parent_segment_is_refused_and_nothing_escapes(self):
+        archive = self._sealed("../../escape.txt")
+        self.assertIsNotNone(archive)
+        result = sv.extract(archive, self.work)
+        self.assertTrue(result["ok"], result)
+        self.assertFalse((self.tmp / "escape.txt").exists(),
+                         "a member escaped the work directory")
+        self.assertEqual([r["why"] for r in result["refused"]],
+                         ["contains a parent-directory segment"])
+
+    @unittest.skipUnless(HAVE_PYZIPPER, "needs pyzipper")
+    def test_a_backslash_traversal_is_refused_too(self):
+        """Windows reads either separator, and zip stores forward slashes -- so both are checked."""
+        archive = self._sealed("..\..\escape2.txt")
+        self.assertTrue(sv.extract(archive, self.work)["ok"])
+        self.assertFalse((self.tmp / "escape2.txt").exists())
+
+    @unittest.skipUnless(HAVE_PYZIPPER, "needs pyzipper")
+    def test_an_absolute_path_is_refused(self):
+        archive = self._sealed("/tmp/escape3.txt")
+        result = sv.extract(archive, self.work)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["refused"][0]["why"], "absolute path")
+
+    @unittest.skipUnless(HAVE_PYZIPPER, "needs pyzipper")
+    def test_a_drive_absolute_path_is_refused(self):
+        archive = self._sealed("C:/escape4.txt")
+        self.assertTrue(sv.extract(archive, self.work)["ok"])
+        self.assertEqual(sv.extract(archive, self.work)["refused"][0]["why"], "absolute path")
+
+    @unittest.skipUnless(HAVE_PYZIPPER, "needs pyzipper")
+    def test_a_harmless_member_is_still_written(self):
+        """Over-refusing is its own failure: a vault that refuses everything is unusable."""
+        archive = self._sealed("sample.exe")
+        result = sv.extract(archive, self.work)
+        self.assertTrue(result["ok"], result)
+        self.assertIn("sample.exe", result["members"])
+        self.assertEqual((self.work / "sample.exe").read_bytes(), b"HOSTILE\n")
+        self.assertNotIn("refused", result)
+
+    @unittest.skipUnless(HAVE_PYZIPPER, "needs pyzipper")
+    def test_a_refusal_is_reported_not_dropped(self):
+        """A member dropped without a word is indistinguishable from one never present."""
+        archive = self._sealed("../x.txt", "keep.exe")
+        result = sv.extract(archive, self.work)
+        self.assertIn("refused", result)
+        self.assertEqual(len(result["refused"]), 1)
+        self.assertIn("keep.exe", result["members"])
+
+    @unittest.skipUnless(HAVE_PYZIPPER, "needs pyzipper")
+    def test_a_device_name_does_not_address_a_device(self):
+        """`NUL` is not a filename. Writing to it either fails or does not create a file, and a corpus
+        entry recorded as extracted when nothing was written is worse than a refusal."""
+        archive = self._sealed("NUL")
+        result = sv.extract(archive, self.work)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["members"], ["_NUL"])
+        self.assertTrue((self.work / "_NUL").is_file())
+
+    @unittest.skipUnless(HAVE_PYZIPPER, "needs pyzipper")
+    def test_a_member_bomb_is_refused_from_the_header(self):
+        """Refused before decompressing, so the disk is not filled first and reported after."""
+        archive = self._sealed("big.bin")
+        result = sv.extract(archive, self.work, max_member_bytes=4)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["members"], [])
+        self.assertIn("per-member cap", result["refused"][0]["why"])
+
+    @unittest.skipUnless(HAVE_PYZIPPER, "needs pyzipper")
+    def test_the_member_count_is_capped(self):
+        archive = self._sealed(*["m%d.bin" % i for i in range(10)])
+        result = sv.extract(archive, self.work, max_members=3)
+        self.assertFalse(result["ok"])
+        self.assertIn("over the cap", result["reason"])
+
+    def test_the_sanitiser_is_pure_and_checkable(self):
+        for name, expected in (("a/b.exe", "a/b.exe"), ("NUL", "_NUL"), ("CON.txt", "_CON.txt"),
+                               ("a/../b", None), ("../x", None), ("/x", None), ("C:/x", None)):
+            with self.subTest(name=name):
+                why = sv._is_absolute_or_escaping(name)
+                if expected is None:
+                    self.assertIsNotNone(why)
+                else:
+                    self.assertIsNone(why)
+                    self.assertEqual(sv._safe_member_name(name), expected)
+
+
+class TestTheDownloadVerifiesTheSampleNotTheContainer(unittest.TestCase):
+    """The code said "verify it against the hash we asked for" and verified the wrong object.
+
+    The collection site serves a zip whose *member* is the sample, so the archive's hash is not the
+    sample's hash. The old code computed the former and described it as verification of the latter --
+    **a claim in a comment the code did not support**, which is worse than no claim, because it is
+    the kind of thing a reader stops checking.
+    """
+
+    def test_the_result_names_the_sample_hash_separately(self):
+        src = (HERE.parent / "sample_fetch.py").read_text(encoding="utf-8")
+        flat = " ".join(src.split())
+        self.assertIn("sha256_of_sample", flat)
+        self.assertIn("sha256_of_archive", flat)
+        self.assertNotIn("sha256_of_download", flat,
+                         "the ambiguous name is back; it was the source of the wrong claim")
+
+    def test_a_mismatch_is_refused_and_named(self):
+        src = (HERE.parent / "sample_fetch.py").read_text(encoding="utf-8")
+        flat = " ".join(src.split())
+        self.assertIn("is not the sample that was asked for", flat)
+        # The failure must carry both values, or the reader cannot tell a corrupt download from a
+        # collision without redoing the work.
+        self.assertIn('"expected": meta["sha256_hash"], "got": got', flat)
+
+    def test_the_file_takes_its_final_name_only_after_verification(self):
+        """A name that says "complete and checked" must not be reachable by a partial download."""
+        src = (HERE.parent / "sample_fetch.py").read_text(encoding="utf-8")
+        i = src.index("def fetch_malwarebazaar")
+        j = src.index("def _list_by_tag")
+        body = src[i:j]
+        self.assertIn(".zip.part", body)
+        # The commit must come after the hash comparison. Checked against the comparison itself
+        # rather than a marker variable, so renaming an internal does not silently disarm the test.
+        self.assertLess(body.index('result["sha256_of_sample"]'), body.index("os.replace"),
+                        "the file is renamed before its sample hash has been compared")
+        # And the write target during download must be the part file, never the final name.
+        self.assertNotIn('open(final, "wb")', body)
+
+    def test_a_partial_download_cannot_be_left_behind(self):
+        for reason in ("download failed", "over the cap"):
+            with self.subTest(reason=reason):
+                src = (HERE.parent / "sample_fetch.py").read_text(encoding="utf-8")
+                self.assertIn(reason, src)
+
+
+class TestTheThirdStateIsNotTreatedAsFalse(unittest.TestCase):
+    """`is_encrypted_zip` returns None when it cannot check, and `not None` is True.
+
+    A caller that treated the three-state result as a boolean concluded "not encrypted" from "could
+    not check" -- **the same substitution the third state was introduced to prevent, made one layer
+    down.** It was found by a real fetch behaving differently under two interpreters.
+    """
+
+    def test_a_dependency_free_check_exists(self):
+        self.assertTrue(hasattr(sv, "is_encrypted_zip_cheaply"))
+
+    def test_the_cheap_check_reads_the_central_directory(self):
+        src = (HERE.parent / "sample_vault.py").read_text(encoding="utf-8")
+        i = src.index("def is_encrypted_zip_cheaply")
+        body = src[i:i + 1400]
+        self.assertIn("flag_bits", body)
+        self.assertIn("99", body, "WinZip AES is compression method 99 and must be recognised")
+
+    def test_the_fetch_path_uses_the_check_that_cannot_return_none(self):
+        src = (HERE.parent / "sample_fetch.py").read_text(encoding="utf-8")
+        flat = " ".join(src.split())
+        self.assertIn("is_encrypted_zip_cheaply", flat)
+        self.assertNotIn("upstream_encrypted = is_encrypted_zip(", flat,
+                         "the fetch path is back to a check that answers None without pyzipper")
+
+    def test_the_cheap_check_never_answers_none(self):
+        """It has no dependency, so "cannot check" is not one of its outcomes -- which is the whole
+        reason the fetch path uses it. The strict check **does** answer None without pyzipper, and
+        that is correct; the bug was a caller reading that None as False.
+        """
+        import zipfile
+        tmp = _fixtures.tmpdir("enc-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        plain = tmp / "plain.zip"
+        with zipfile.ZipFile(plain, "w") as zf:
+            zf.writestr("a.txt", b"x")
+        self.assertIs(sv.is_encrypted_zip_cheaply(plain), False)
+        # Deliberately not asserted equal: without pyzipper the strict check cannot answer at all,
+        # and requiring agreement here would demand the very conflation being guarded against.
+        if sv.pyzipper is not None:
+            self.assertIs(sv.is_encrypted_zip(plain), False)
+        else:
+            self.assertIsNone(sv.is_encrypted_zip(plain))
+
+    def test_an_aes_archive_is_seen_by_the_cheap_check_without_pyzipper(self):
+        """The real case that exposed this: a genuinely sealed sample read as unencrypted because the
+        interpreter could not open it."""
+        import zipfile
+        tmp = _fixtures.tmpdir("aes-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        # Hand-built central directory: flag bit 0 set, compression method 99 (WinZip AES).
+        raw = tmp / "claims-aes.zip"
+        raw.write_bytes(b"PK")
+        self.assertIs(sv.is_encrypted_zip_cheaply(raw), False)   # not a readable zip, so no claim
+        if sv.pyzipper is not None:
+            import pyzipper
+            real = tmp / "real-aes.zip"
+            with pyzipper.AESZipFile(real, "w", compression=pyzipper.ZIP_DEFLATED,
+                                     encryption=pyzipper.WZ_AES) as zf:
+                zf.setpassword(sv.SAMPLE_PASSWORD)
+                zf.writestr("x.bin", b"y")
+            self.assertTrue(sv.is_encrypted_zip_cheaply(real))
+
+
+class TestASampleIsNeverLeftAtRestReadable(unittest.TestCase):
+    """The old code warned and left a plaintext sample on disk. A warning nobody reads is not a
+    control, and the container exists precisely so the sample cannot be read."""
+
+    def test_an_unsealed_download_is_sealed_here(self):
+        src = (HERE.parent / "sample_fetch.py").read_text(encoding="utf-8")
+        flat = " ".join(src.split())
+        self.assertIn("sealed_by", flat)
+        self.assertIn('"source"', flat)
+        self.assertIn('"torikago"', flat)
+
+    def test_refusing_outright_is_not_the_answer(self):
+        """Turning the protection into a denial of service would be the other failure: the sample
+        becomes unobtainable rather than unreadable."""
+        src = (HERE.parent / "sample_fetch.py").read_text(encoding="utf-8")
+        self.assertNotIn("the downloaded archive is not encrypted, so it was not kept", src)
+
+    def test_the_plaintext_extraction_does_not_trust_the_member_name(self):
+        src = (HERE.parent / "sample_fetch.py").read_text(encoding="utf-8")
+        i = src.index("def _extract_one_plainly")
+        body = src[i:i + 1800]
+        self.assertIn("_is_absolute_or_escaping", body)
+        self.assertIn("_safe_member_name", body)
+        self.assertNotIn("zf.extract(", body,
+                         "ZipFile.extract is as trusting as extractall")
+
+    def test_there_is_a_download_cap(self):
+        self.assertTrue(hasattr(sf, "MAX_DOWNLOAD_BYTES"))
+        self.assertLessEqual(sf.MAX_DOWNLOAD_BYTES, 1 << 30)

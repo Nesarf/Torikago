@@ -47,10 +47,25 @@ hard to guess.
 from __future__ import annotations
 
 import hashlib
+import re
 import json
 from pathlib import Path
 
 SAMPLE_PASSWORD = b"infected"
+
+# Caps on unsealing. A sealed container is the one input nobody can inspect before opening, so the
+# limits are enforced from the headers first and again while writing -- a header can lie.
+MAX_MEMBERS = 64
+MAX_TOTAL_BYTES = 1 << 30          # 1 GiB decompressed, across all members
+MAX_MEMBER_BYTES = 512 << 20       # 512 MiB for any single member
+
+# Names that address devices rather than files on Windows. Writing to one either fails or does not
+# create a file at all, and a corpus entry recorded as extracted when nothing was written is worse
+# than a refusal.
+_DEVICE_NAMES = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + ["COM%d" % i for i in range(1, 10)]
+    + ["LPT%d" % i for i in range(1, 10)])
 SAMPLE_SUFFIX = ".zip"
 
 try:
@@ -157,11 +172,83 @@ def store(sample: Path, dest_dir: Path, *, password: bytes = SAMPLE_PASSWORD) ->
             "stored": True, "encrypted": True}
 
 
-def extract(archive: Path, work_dir: Path, *, password: bytes = SAMPLE_PASSWORD) -> dict:
+def _is_absolute_or_escaping(name: str) -> str | None:
+    """Why a member name is unsafe, or None. Returned as a reason so the caller can report it.
+
+    **The name is untrusted even though the container is ours.** It was written by whoever uploaded
+    the sample, and `extractall()` does exactly what the names say -- so `../../x` writes wherever the
+    user has permission. The first version of `extract()` called `extractall()` after checking only
+    that the archive was encrypted, which is a check of the container and not of its contents.
+    """
+    if not name or name in (".", ".."):
+        return "empty or relative to nothing"
+    # Both separators, because a Windows host treats either as one and zip stores forward slashes.
+    normalised = name.replace("\\", "/")
+    if normalised.startswith("/") or re.match(r"^[A-Za-z]:", normalised):
+        return "absolute path"
+    if any(part == ".." for part in normalised.split("/")):
+        return "contains a parent-directory segment"
+    return None
+
+
+def _safe_member_name(name: str) -> str:
+    """A name safe to create on Windows and inside the work directory.
+
+    Device names are handled because they are not filenames at all: `NUL`, `CON`, `PRN`, `AUX`,
+    `COM1`-`COM9` and `LPT1`-`LPT9` address devices, so writing to them either fails or goes somewhere
+    that is not a file -- **and a corpus entry that silently wrote to a device would be recorded as
+    extracted**. The suffix trick is used rather than replacement, so two members cannot collide into
+    one after sanitising.
+    """
+    parts = []
+    for piece in name.replace("\\", "/").split("/"):
+        piece = re.sub(r'[<>:"|?*\x00-\x1f]', "_", piece).strip(" .")
+        if not piece:
+            continue
+        stem = piece.split(".", 1)[0].upper()
+        if stem in _DEVICE_NAMES:
+            piece = "_" + piece
+        parts.append(piece)
+    return "/".join(parts) or "_unnamed"
+
+
+def is_encrypted_zip_cheaply(path: Path) -> bool:
+    """Whether the zip's own directory says its members are encrypted. No password needed.
+
+    **This exists because `is_encrypted_zip` answers `None` when `pyzipper` is missing, and `not None`
+    is `True`** -- so a caller that treated the three-state result as a boolean concluded "not
+    encrypted" from "could not check", and a genuinely AES-sealed sample was handled as plaintext.
+    That is the same substitution the three-state return was introduced to prevent, made one layer
+    down by a caller that ignored the third state.
+
+    The central directory carries the answer and this reads it directly: the general-purpose
+    encryption bit, and compression method 99 (WinZip AES). **Weaker evidence than failing to read
+    the file** -- it is what the archive claims -- but it needs no dependency, and it is enough to
+    decide whether to demand one.
+    """
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as zf:
+            infos = zf.infolist()
+            if not infos:
+                return False
+            return any((i.flag_bits & 0x1) or i.compress_type == 99 for i in infos)
+    except (zipfile.BadZipFile, OSError):
+        return False
+
+
+def extract(archive: Path, work_dir: Path, *, password: bytes = SAMPLE_PASSWORD,
+            max_members: int = MAX_MEMBERS, max_total_bytes: int = MAX_TOTAL_BYTES,
+            max_member_bytes: int = MAX_MEMBER_BYTES) -> dict:
     """Unseal into a work directory the caller names. Never in place.
 
     In place would make the sample readable exactly where the protection is watching, which is the
     situation the encryption exists to avoid.
+
+    **Members are written one at a time, after checking the name.** `extractall()` is not used: it
+    trusts the archive's own names, which is the definition of a zip slip. Every member is also
+    counted and sized against caps, because "it is only one sample" is an assumption about a file
+    that arrives sealed precisely so nobody can check it in advance.
     """
     if pyzipper is None:
         return {"ok": False, "reason": NEEDS_PYZIPPER}
@@ -170,20 +257,89 @@ def extract(archive: Path, work_dir: Path, *, password: bytes = SAMPLE_PASSWORD)
     if not is_encrypted_zip(archive):
         return {"ok": False, "reason": "%s is not an encrypted zip" % archive.name}
     work_dir.mkdir(parents=True, exist_ok=True)
+    root = work_dir.resolve()
+
+    written, refused = [], []
+    total = 0
     try:
         with pyzipper.AESZipFile(archive) as zf:
             zf.setpassword(password)
-            names = zf.namelist()
-            zf.extractall(work_dir)
+            infos = zf.infolist()
+            if len(infos) > max_members:
+                return {"ok": False, "reason": "the archive holds %d members, over the cap of %d"
+                                               % (len(infos), max_members),
+                        "members_found": len(infos), "members_limit": max_members}
+            declared = sum(i.file_size for i in infos)
+            if declared > max_total_bytes:
+                # Checked from the headers first, so a declared-bomb is refused before any byte is
+                # decompressed rather than after the disk is full.
+                return {"ok": False,
+                        "reason": "the archive declares %d bytes, over the cap of %d"
+                                  % (declared, max_total_bytes),
+                        "declared_bytes": declared, "total_limit": max_total_bytes}
+
+            for info in infos:
+                name = info.filename
+                why = _is_absolute_or_escaping(name)
+                if why:
+                    refused.append({"member": name, "why": why})
+                    continue
+                safe = _safe_member_name(name)
+                target = root / safe
+                # Belt to the sanitizer's braces: resolve and confirm, because a sanitiser that is
+                # subtly wrong is exactly the sort of thing that looks fine until it is not.
+                try:
+                    resolved = target.resolve()
+                    if resolved != root and root not in resolved.parents:
+                        refused.append({"member": name, "why": "resolves outside the work directory"})
+                        continue
+                except OSError:
+                    refused.append({"member": name, "why": "path could not be resolved"})
+                    continue
+
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                if info.file_size > max_member_bytes:
+                    refused.append({"member": name, "why": "declares %d bytes, over the per-member "
+                                                          "cap of %d" % (info.file_size,
+                                                                         max_member_bytes)})
+                    continue
+
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as src, open(target, "wb") as dst:
+                    while True:
+                        block = src.read(1 << 20)
+                        if not block:
+                            break
+                        total += len(block)
+                        if total > max_total_bytes:
+                            # Enforced while writing, not only from the header: a header can lie, and
+                            # the header is the part an attacker controls.
+                            dst.close()
+                            target.unlink(missing_ok=True)
+                            return {"ok": False,
+                                    "reason": "decompressed past the total cap of %d bytes"
+                                              % max_total_bytes,
+                                    "written": written, "refused": refused}
+                        dst.write(block)
+                written.append(safe)
     except Exception as exc:                                   # noqa: BLE001
         # A wrong password raises here, and it is worth naming: that is a configuration mistake, not
         # a corrupt sample, and the two need different responses.
-        return {"ok": False, "reason": "could not unseal: %s" % exc}
-    return {
-        "ok": True, "work_dir": str(work_dir), "members": names,
+        return {"ok": False, "reason": "could not unseal: %s" % exc,
+                "written": written, "refused": refused}
+    result = {
+        "ok": True, "work_dir": str(work_dir), "members": written,
         "note": ("this directory now holds readable hostile bytes and the protection can see them. "
                  "Analyse it, then delete the directory. Do not leave it in place."),
     }
+    if refused:
+        # Reported, never silent. A member dropped without a word is indistinguishable from an
+        # archive that never held it.
+        result["refused"] = refused
+        result["note"] += (" %d member(s) were refused as unsafe; see `refused`." % len(refused))
+    return result
 
 
 def record(entry: dict, log: Path) -> None:

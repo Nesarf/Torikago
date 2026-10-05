@@ -41,6 +41,10 @@ except ImportError:                                    # pragma: no cover - repo
         return None
 
 # Refused outright, with the reason, so a mistake is caught before a byte is written.
+# A download cap. Streaming solved the memory problem and did nothing about the disk: a page that
+# declares ten gigabytes still writes ten gigabytes.
+MAX_DOWNLOAD_BYTES = 512 << 20
+
 FORBIDDEN_ROOTS = (
     r"E:\~Sayori~Sleeping~",     # the workspace: everything here ends up in a repository
     r"E:\DaShaoHuo",             # downloads and caches, not samples
@@ -215,41 +219,140 @@ def fetch_malwarebazaar(sha: str, *, fetch_bytes: bool, dest: Path, auth_key: st
         result["reason"] = "the response carried no hash to download by"
         return result
 
-    # Request the sample and verify it against the hash we asked for. An unverified sample is worse
-    # than no sample: it would be filed under a name that describes something else.
+    # The site serves a password-protected zip whose *member* is the sample. So the archive's own
+    # hash is not the sample's hash, and the previous version of this function computed the former
+    # and described it as verification of the latter -- a claim in a comment that the code did not
+    # support. An unverified sample is worse than no sample: it is filed under a hash that describes
+    # something else, and every later measurement inherits the error.
     dl = ("query=get_file&sha256_hash=%s" % meta["sha256_hash"]).encode()
     req = urllib.request.Request("https://mb-api.abuse.ch/api/v1/", data=dl,
                                  headers=auth_headers(auth_key))
     dest.mkdir(parents=True, exist_ok=True)
-    out = dest / (meta["sha256_hash"] + ".zip")
+    final = dest / (meta["sha256_hash"] + ".zip")
+
+    # Written to `.part` and renamed only once everything below has passed. Two reasons, and the
+    # second is the one that matters: an interrupted download must not leave a file whose name says
+    # it is complete, and **a file is not allowed to take its final name before it has been checked.**
+    part = final.with_suffix(".zip.part")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as fh, open(out, "wb") as target:
+        written = 0
+        with urllib.request.urlopen(req, timeout=timeout) as fh, open(part, "wb") as target:
             while True:
                 chunk = fh.read(1 << 20)
                 if not chunk:
                     break
+                written += len(chunk)
+                if written > MAX_DOWNLOAD_BYTES:
+                    target.close()
+                    part.unlink(missing_ok=True)
+                    return {"ok": False,
+                            "reason": "the download passed %d bytes, over the cap; a torrent or a "
+                                      "mis-declared page will do this" % MAX_DOWNLOAD_BYTES}
                 target.write(chunk)
     except (urllib.error.URLError, OSError) as exc:
+        part.unlink(missing_ok=True)
         return {"ok": False, "reason": "download failed: %s" % exc}
 
-    got = sha256_file(out)
-    result["downloaded"] = True
-    result["path"] = str(out)
-    result["sha256_of_download"] = got
-    result["encrypted_at_rest"] = is_encrypted_zip(out)
+    import sample_vault as sv
 
-    # The archive as downloaded is already password-protected by the collection site, and that is
-    # what lets it survive on this machine at all: the protection cannot read inside it. Verified
-    # rather than assumed, because an archive that only *looks* encrypted is worse than none -- the
-    # operator would leave a readable sample lying about believing it sealed.
-    if not result["encrypted_at_rest"]:
-        result["warning"] = ("the downloaded archive is NOT encrypted, so the protection on this "
-                             "machine can read and remove it. Move it into the vault immediately or "
-                             "delete it.")
-    result["note"] = ("the payload arrives as a password-protected zip (`infected`), which is why the "
-                      "archive hash will not match the sample hash. Leave it sealed: to analyse it, "
-                      "unseal into a work directory you will delete afterwards.")
+    result["downloaded"] = True
+    result["sha256_of_archive"] = sha256_file(part)
+    # `is_encrypted_zip_cheaply`, not `is_encrypted_zip`: the latter returns None without pyzipper,
+    # and `not None` is True -- so a sealed sample would be routed down the plaintext path. The cheap
+    # check reads the zip's own directory and needs no dependency, which also means this decision no
+    # longer depends on what happens to be installed.
+    upstream_encrypted = sv.is_encrypted_zip_cheaply(part)
+    result["encrypted_from_source"] = upstream_encrypted
+    if upstream_encrypted:
+        result["encryption_evidence"] = "the archive's own central directory marks its members encrypted"
+
+    # **It turned out not to be encrypted.** A real fetch from this collection produced a plaintext
+    # zip while the comment here claimed a password-protected one, and the old code answered that by
+    # warning and leaving the plaintext sample in place. That is the worst of the three possible
+    # answers: a readable sample on disk beside a warning nobody reads, when the entire purpose of the
+    # vault is that the sample cannot be read. Refusing outright would turn the protection into a
+    # denial of service, so if the source did not seal it, it is sealed here.
+    if sv.pyzipper is None:
+        part.unlink(missing_ok=True)
+        return {"ok": False,
+                "reason": ("cannot verify or seal the sample without pyzipper, and an unverified "
+                           "sample is not kept. Install it: pip install torikago[vault]")}
+    probe = dest / (".verify-" + meta["sha256_hash"])
+    try:
+        probe.mkdir(parents=True, exist_ok=True)
+        if upstream_encrypted:
+            opened = sv.extract(part, probe)
+            if not opened.get("ok"):
+                return {"ok": False, "reason": "could not open the sealed archive: %s"
+                                               % opened.get("reason")}
+            members = [probe / m for m in opened["members"]]
+            if len(members) != 1:
+                return {"ok": False,
+                        "reason": "expected exactly one member inside the archive, found %d"
+                                  % len(members), "members": opened["members"]}
+            sample = members[0]
+        else:
+            sample = _extract_one_plainly(part, probe)
+            if isinstance(sample, dict):
+                return sample
+        got = sha256_file(sample)
+        result["sha256_of_sample"] = got
+        if got.lower() != meta["sha256_hash"].lower():
+            return {"ok": False, "stage": "verify",
+                    "reason": "the sample inside the archive is not the sample that was asked for",
+                    "expected": meta["sha256_hash"], "got": got}
+        result["sample_verified"] = True
+    finally:
+        __import__("shutil").rmtree(probe, ignore_errors=True)
+
+    # Committed only now, after the hash check has passed. `os.replace` rather than a rename loop,
+    # because a partially written file must never be able to take the name that claims it is complete.
+    if upstream_encrypted:
+        os.replace(part, final)
+        result["path"] = str(final)
+        result["sealed_by"] = "source"
+    else:
+        # Not sealed by the source, so sealed here -- and this must happen before the plaintext
+        # archive is dropped, or the sample would briefly exist nowhere at all.
+        sealed = sv.store(sample, dest)
+        if not sealed.get("ok"):
+            return {"ok": False, "stage": "seal", "reason": sealed.get("reason")}
+        result["path"] = sealed["path"]
+        result["sealed_by"] = "torikago"
+        result["sealed_sha256"] = sealed["sha256"]
+        part.unlink(missing_ok=True)
+
+    result["note"] = ("verified: the sample inside the archive hashes to the hash that was asked "
+                      "for, and it is sealed at rest so the protection on this machine cannot read "
+                      "it. To analyse it, unseal into a work directory you will delete afterwards.")
     return result
+
+
+def _extract_one_plainly(archive: Path, into: Path):
+    """Pull the single member out of a plaintext zip, or return a failure dict.
+
+    **Written by hand rather than with `extract()`**, because the member name comes from an archive
+    nobody has authenticated -- and `ZipFile.extract()` is as trusting as `extractall()`.
+    """
+    import zipfile
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            names = [n for n in zf.namelist() if not n.endswith("/")]
+            if len(names) != 1:
+                return {"ok": False,
+                        "reason": "expected exactly one member inside the archive, found %d"
+                                  % len(names), "members": names}
+            name = names[0]
+            why = __import__("sample_vault")._is_absolute_or_escaping(name)
+            if why:
+                return {"ok": False, "reason": "the archive member has an unsafe name (%s): %s"
+                                               % (why, name)}
+            target = into / __import__("sample_vault")._safe_member_name(name)
+            with zf.open(name) as src, open(target, "wb") as dst:
+                __import__("shutil").copyfileobj(src, dst, 1 << 20)
+            return target
+    except (zipfile.BadZipFile, OSError) as exc:
+        return {"ok": False, "reason": "the download is not a readable archive: %s" % exc}
 
 
 def _list_by_tag(tag: str, auth_key, *, limit: int = 20) -> int:
@@ -457,7 +560,8 @@ def main(argv=None) -> int:
         print()
         print("sample      : %s" % result["path"])
         print()
-        print("At rest      : encrypted=%s" % result.get("encrypted_at_rest"))
+        print("At rest      : sealed_by=%s  sample_verified=%s"
+              % (result.get("sealed_by"), result.get("sample_verified")))
         if result.get("warning"):
             print("WARNING      : %s" % result["warning"])
         print()
