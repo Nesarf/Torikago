@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torikago"
-version = "1.3.1"
+version = "1.3.2"
 description = "Static triage for an unknown executable: identify, unpack, extract indicators. Never executes the target."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -29,6 +29,15 @@ pyinstaller = ["nanodesu>=1.2,<2"]
 
 [project.scripts]
 torikago = "torikago:main"
+
+[project.urls]
+# The PyPI page had no links at all: nowhere to go for the source, the issue tracker or the
+# changelog. For a project whose purpose is to be useful to somebody who just found it, a
+# dead-end page is the wrong first impression.
+Homepage = "https://github.com/Nesarf/Torikago"
+Repository = "https://github.com/Nesarf/Torikago"
+Issues = "https://github.com/Nesarf/Torikago/issues"
+Changelog = "https://github.com/Nesarf/Torikago/releases"
 
 [tool.setuptools]
 # Both modules, not just the one named after the project. `unpack.py` was missing from the

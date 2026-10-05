@@ -1,0 +1,108 @@
+# Publish Torikago on a tag.
+#
+# A pure-Python package, so there is no binary to build and nothing to sign: `pip` verifies the
+# wheel against the index hashes, which is a stronger guarantee than an Authenticode signature on
+# a file nobody is obliged to check.
+#
+# PyPI publication uses **Trusted Publishing**, not a token: the runner asks GitHub for an OIDC
+# token, PyPI verifies it came from this repository, this workflow file and the environment named
+# below, and issues a short-lived upload credential. Nothing secret is stored anywhere.
+#
+# The environment name is pinned here so that what the PyPI settings page must say is unambiguous.
+# A mismatch between this string and the publisher configured on PyPI is the most common way this
+# fails, and it fails at the last step of a release, after everything else has gone green.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  pypi:
+    name: build and publish to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/torikago
+    permissions:
+      id-token: write       # required for Trusted Publishing; without it the upload is refused
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the build tooling
+        run: python -m pip install --upgrade build twine
+
+      - name: The tag must match the version in pyproject.toml
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          declared=$(python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          echo "tag=$tag declared=$declared"
+          test "$tag" = "$declared" || { echo "::error::tag $tag does not match version $declared"; exit 1; }
+
+      - name: The suite must pass before anything is published
+        run: python -m unittest discover -s test
+
+      - name: Build
+        run: python -m build
+
+      - name: Validate the distributions
+        run: python -m twine check dist/*
+
+      - name: List what is actually in the wheel
+        # A build that succeeds says nothing about its contents. A release of this very package once
+        # shipped without `unpack.py` -- the whole implementation behind `--unpack` -- and the build,
+        # `twine check` and the install all reported success. Only the file list showed it. Printing
+        # the list costs nothing and would have caught it at the source.
+        run: |
+          python - <<'PY'
+          import glob, zipfile
+          for wheel in sorted(glob.glob("dist/*.whl")):
+              print(wheel)
+              for name in zipfile.ZipFile(wheel).namelist():
+                  print("   ", name)
+          expected = {"torikago.py", "unpack.py"}
+          present = {n for w in glob.glob("dist/*.whl") for n in zipfile.ZipFile(w).namelist()}
+          missing = expected - present
+          if missing:
+              raise SystemExit("the wheel is missing %s" % sorted(missing))
+          PY
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@67339c736fd9354cd4f8cb0b744f2b82a74b5c70  # release/v1
+        with:
+          packages-dir: dist/
+
+  release-notes:
+    name: attach the notes to the GitHub release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Create the release with the notes committed for this version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes="RELEASE_NOTES_${version}.md"
+          if [ ! -f "$notes" ]; then
+            echo "::error::$notes is not in the tree; a release without notes is a release nobody can review later"
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Torikago ${version}" \
+            --notes-file "$notes" \
+            --verify-tag
