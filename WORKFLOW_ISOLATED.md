@@ -137,7 +137,8 @@ evaluation ISOs itself, which gives the lean build **and** a traceable origin:
 |---|---|---|
 | ISO name | `19044.1288.211006-0501…CLIENT_LTSC_EVAL_x64FRE_en-us` | — |
 | size | 4.56 GB (4,898,582,528 bytes, **verified**) | ~5.5 GB |
-| link | **verified working**, resolves to `software-download.microsoft.com` | must be clicked by hand — the Evaluation Center **returns 403 to automated requests** |
+| link | **verified working**, resolves to `software-download.microsoft.com` |
+| obtained | 4,898,582,528 bytes — **byte count matches the server's `Content-Length` exactly**; SHA256 `e4ab2e3535be5748252a8d5d57539a6e59be8d6726345ee10e7afd2cb89fefb5` | must be clicked by hand — the Evaluation Center **returns 403 to automated requests** |
 | RAM floor | **2 GB** | 4 GB, ~6 GB to be comfortable |
 | also needs | — | TPM 2.0 and Secure Boot (bypassable, but more moving parts) |
 | support until | 2027-01-12 | ~2034 |
