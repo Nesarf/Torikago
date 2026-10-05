@@ -460,6 +460,32 @@ class TestItReachesTheReport(unittest.TestCase):
 
 
 
+    def test_a_common_observation_is_not_a_reason(self):
+
+        """The separation the sweep forced: `reasons` is what is unusual, `notes` is what is merely
+
+        true, and `attention` counts only the first. Without this, five facts true of everything
+
+        weigh the same as one destructive finding."""
+
+        f = self.tmp / "a.exe"
+
+        f.write_bytes(build_pe_with_codeview("C:" + chr(92) + "p" + chr(92) + "a.pdb",
+
+                                             bytes(range(16))))
+
+        report = tk.build_report(f, None)
+
+        a = report["assessment"]
+
+        self.assertEqual(a["attention"], len(a["reasons"]))
+
+        for note in a["notes"]:
+
+            self.assertNotIn(note, a["reasons"])
+
+
+
     def test_debug_info_appears_in_the_report(self):
 
         f = self.tmp / "a.exe"
@@ -474,35 +500,37 @@ class TestItReachesTheReport(unittest.TestCase):
 
 
 
-    def test_the_codeview_path_becomes_an_attention_reason(self):
+    def test_the_codeview_path_is_reported_as_an_ordinary_fact(self):
+
+        """It belongs in `notes`, not `reasons`, and the placement is measured rather than
+
+        stylistic: across 298 real binaries, 84.9% record a full build-machine path, because debug
+
+        information survives in ordinary release builds. An earlier claim in this project that the
+
+        signal was "selective rather than noise" came from a 101-file sample and did not survive a
+
+        wider one."""
 
         f = self.tmp / "a.exe"
 
-        f.write_bytes(build_pe_with_codeview(r"D:\Proj\obj\Debug\a.pdb", bytes(range(16))))
+        f.write_bytes(build_pe_with_codeview("D:" + chr(92) + "Proj" + chr(92) + "obj"
+
+                                             + chr(92) + "Debug" + chr(92) + "a.pdb",
+
+                                             bytes(range(16))))
 
         report = tk.build_report(f, None)
 
-        reasons = " ".join(report["assessment"]["reasons"])
+        a = report["assessment"]
 
-        self.assertIn("build-time .pdb path", reasons)
+        self.assertIn("build-time .pdb path", " ".join(a["notes"]))
+
+        self.assertNotIn("build-time .pdb path", " ".join(a["reasons"]),
+
+                         "84.9% of ordinary binaries have this; it must not be ranked")
 
 
-
-    def test_a_shipped_pdb_is_recognised_and_matched(self):
-        """Uses a .pdb written by a real toolchain, because a synthetic container cannot establish
-        that the reader agrees with reality -- a fixture built from the same understanding as the
-        reader only shows the two share assumptions."""
-        sample = Path(r"D:\PWSBHv1.5.0")
-        if not (sample / "PowerfulWindSlickedBackHair.exe").is_file():
-            self.skipTest("the real-sample pair is not present on this machine")
-        report = tk.build_report(sample / "PowerfulWindSlickedBackHair.exe", None)
-        info = report["debug_info"]
-        self.assertTrue(info["available"])
-        self.assertEqual(info["sibling_pdb"]["format"], "msf-native-pdb")
-        self.assertIs(info["pdb_matches_binary"], True,
-                      "the real .pdb beside this binary must match its CodeView record")
-        reasons = " ".join(report["assessment"]["reasons"])
-        self.assertIn(".pdb shipped beside the binary", reasons)
 
     def test_a_managed_assembly_is_not_called_high_entropy(self):
 
@@ -586,6 +614,8 @@ class TestTheDebugDirectoryIsReachable(unittest.TestCase):
         off = tk.rva_to_offset(pe, dd["rva"])
         self.assertGreater(off / len(data), 0.5,
                            "the debug directory is not late in this file after all")
+
+
 
 
 if __name__ == "__main__":

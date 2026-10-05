@@ -576,12 +576,25 @@ def identify_packer(pe: dict, data: bytes, imports: list) -> dict:
         findings.append({"packer": "likely packed",
                          "evidence": "executable section is high-entropy (encrypted or compressed code)"})
     total_imports = sum(i["count"] for i in imports)
+    # Whether this file is code at all decides what an empty import table means. A data-only module
+    # has no imports because it calls nothing: ICU ships its tables as `icudt*.dll`, one .rdata
+    # section of 30+ MB and no code, and reporting that as a packer stub was simply the wrong
+    # reading of an expected shape. Code-less files are named as such instead, which is the more
+    # useful statement anyway -- "a 30 MB data blob" is worth knowing about a file, and "packed"
+    # is not true of it.
+    has_code = any(s.get("executable") for s in (pe.get("sections") or []))
     if not stub_like and total_imports == 0:
-        # A near-empty import table is the classic packer stub, but "few imports" is not:
-        # a small legitimate DLL can import one function. Only zero imports counts, and the
-        # high-entropy evidence above covers stubs that do resolve a handful of APIs.
-        findings.append({"packer": "likely packed or delay-loaded",
-                         "evidence": "no imported functions"})
+        # A near-empty import table is the classic packer stub, but "few imports" is not: a small
+        # legitimate DLL can import one function. Only zero imports counts, and the high-entropy
+        # evidence above covers stubs that do resolve a handful of APIs.
+        if has_code:
+            findings.append({"packer": "likely packed or delay-loaded",
+                             "evidence": "no imported functions"})
+        else:
+            findings.append({"packer": "data module, not code",
+                             "evidence": "no executable section and no imported functions: this is "
+                                         "a data file in a PE container, so an empty import "
+                                         "table is expected rather than a packer stub"})
 
     dedup = {}
     for f in findings:
@@ -1877,8 +1890,19 @@ def hashes_of(data: bytes, part: int = 0) -> dict:
 def assess(pe: dict | None, packer: dict, strings: dict, iocs: dict,
            imports: list, embedded: list, destructive: dict | None = None,
            debug_info: dict | None = None) -> dict:
-    """A short list of reasons this file deserves attention. Not a verdict."""
-    reasons = []
+    """What about this file is unusual, and what is merely true.
+
+    The distinction is measured rather than guessed. Across 298 ordinary binaries from a normal
+    drive, a URL appears in 99.7%, the "APIs worth noting" set in 98.7%, debug information in
+    84.9%, and a TLS callback in 69.5% -- while a packer verdict fires on 1.0%, an embedded PE on
+    0.3%, and a destructive finding on 0.7%.
+
+    `attention` used to be `len(reasons)`, so five facts true of everything weighed the same as one
+    destructive finding. Since the job is to surface the rare thing, the ubiquitous observations
+    are kept but no longer ranked: `reasons` is the unusual, `notes` is the ordinary.
+    """
+    reasons, notes = [], []
+
     # Destructive capability is reported first. It is the one finding whose consequence is
     # unrecoverable, and it is judged on structural evidence rather than on an import that
     # ordinary software also uses.
@@ -1887,28 +1911,33 @@ def assess(pe: dict | None, packer: dict, strings: dict, iocs: dict,
             if f["severity"] in ("high", "critical"):
                 reasons.append("%s [%s]: %s" % (f["capability"].upper(), f["severity"],
                                                 f["evidence"]))
+
     if packer["verdict"] not in ("none",):
-        reasons.append("packed or encrypted: " + ", ".join(
-            f["packer"] for f in packer["findings"]))
+        # "data module, not code" is a finding but not a packing, so it does not get that word.
+        labels = sorted({f["packer"] for f in packer["findings"]})
+        if labels == ["data module, not code"]:
+            notes.append("a PE container holding only data: no executable section and no imports")
+        else:
+            reasons.append("packed or encrypted: " + ", ".join(labels))
+
     if pe:
         # Not for a managed assembly. IL plus metadata in .text is far less redundant than native
         # machine code, so it sits near the top of the entropy range by construction -- a real
-        # .NET sample measured 7.98 and was called packed. The packer finding has known this for
-        # a while; this reason had not, so the same file was still described as high-entropy
-        # after the packer verdict was corrected.
-        exec_high = [s["name"] for s in pe["sections"]
-                     if s["executable"] and s["entropy"] >= HIGH_ENTROPY]             if not pe.get("is_dotnet") else []
-        if exec_high:
-            reasons.append("high-entropy executable section(s): " + ", ".join(exec_high))
+        # .NET sample measured 7.98 and was called packed. The packer finding has known this for a
+        # while; this reason had not, so the same file was still described as high-entropy after
+        # the packer verdict was corrected.
+        if not pe.get("is_dotnet"):
+            exec_high = [s["name"] for s in pe["sections"]
+                         if s["executable"] and s["entropy"] >= HIGH_ENTROPY]
+            if exec_high:
+                reasons.append("high-entropy executable section(s): " + ", ".join(exec_high))
         if pe["directories"].get("tls"):
-            reasons.append("has a TLS callback (runs before the entry point)")
+            # 69.5% of ordinary binaries. Real, and not a reason to look twice.
+            notes.append("has a TLS callback (runs before the entry point)")
+
     if embedded:
         reasons.append(f"{len(embedded)} embedded PE image(s)")
-    # Debug information is a disclosure, not a capability, and it is reported in that register.
-    # A shipped .pdb hands over type names, method names and source paths; a CodeView record alone
-    # hands over the build machine's directory layout. Either makes the rest of the analysis
-    # easier, which is precisely why an analyst wants to be told, and why a publisher should not
-    # have shipped it.
+
     if debug_info and debug_info.get("available"):
         pdb = debug_info.get("sibling_pdb") or {}
         if pdb and pdb.get("format", "").startswith(("msf", "portable")):
@@ -1916,22 +1945,26 @@ def assess(pe: dict | None, packer: dict, strings: dict, iocs: dict,
             where = ("matches this binary" if match is True
                      else "does NOT match this binary" if match is False
                      else "match unverified")
+            # 0% of the corpus: a .pdb that shipped is genuinely rare and worth the top of the list.
             reasons.append("a .pdb shipped beside the binary (%s, %s)"
                            % (pdb.get("format"), where))
-        if debug_info.get("build_pdb_path"):
-            # A full path and a bare filename are not the same disclosure. Chromium's official
-            # builds record just "electron.exe.pdb", which gives away nothing beyond the fact of a
-            # debug build; a compiled-for-this-project sample recorded the whole
-            # ...\obj\Debug\... path, which names the project and the source layout. Say which.
-            if debug_info.get("build_machine_dirs"):
-                reasons.append("debug build: the CodeView record names the full build-time .pdb "
-                               "path, so the build machine's directory layout is in the binary")
-            else:
-                reasons.append("built with debug information (the CodeView record names a .pdb, "
-                               "but no path beyond the file name)")
+        path = debug_info.get("build_pdb_path")
+        if path and debug_info.get("build_machine_dirs"):
+            # A full path and a bare filename are different disclosures -- but neither is rare.
+            # Debug information survives in ordinary release builds: 84.9% of the corpus records a
+            # full build path, and an earlier note claiming this was "selective rather than noise"
+            # was drawn from a 101-file sample and did not survive a wider one.
+            notes.append("built with debug information: the CodeView record names the build-time "
+                         ".pdb path (%s)" % path if len(path) < 90 else
+                         "built with debug information: the CodeView record names the build-time "
+                         ".pdb path")
+        elif path:
+            notes.append("built with debug information (a .pdb is named, with no path beyond the "
+                         "file name)")
+
     # Imports are a weak signal on their own: any real program resolves APIs dynamically and
-    # allocates memory. Only the combination (a notable API in a packed or embedded-PE file)
-    # is worth ranking highly, so the wording says what is actually true.
+    # allocates memory. Only the combination (a notable API in a packed or embedded-PE file) is
+    # worth ranking highly, so the wording says what is actually true.
     api_hits, strong = [], []
     for imp in imports:
         for fn in imp["functions"]:
@@ -1941,27 +1974,38 @@ def assess(pe: dict | None, packer: dict, strings: dict, iocs: dict,
                 if key in STRONG_SIGNAL_IMPORTS:
                     strong.append(fn)
     # The injection triad is judged first, and on the full import set: it is the single most
-    # meaningful import signal there is, and it must fire in single-file triage too, not only
-    # in batch scan mode. Escalating on the combination rather than on any one API is what
-    # keeps ordinary software -- which uses VirtualAlloc and GetProcAddress constantly --
-    # out of the report.
+    # meaningful import signal there is, and it must fire in single-file triage too, not only in
+    # batch scan mode. Escalating on the combination rather than on any one API is what keeps
+    # ordinary software -- which uses VirtualAlloc and GetProcAddress constantly -- out of the
+    # report.
     low = {fn.lower() for fn in api_hits}
-    if {"virtualalloc", "writeprocessmemory", "createremotethread"} <= low:
+    triad = {"virtualalloc", "writeprocessmemory", "createremotethread"} <= low
+    if triad:
         reasons.append("injection triad (VirtualAlloc + WriteProcessMemory + CreateRemoteThread)")
     context = (packer["verdict"] not in ("none", "n/a")) or bool(embedded)
     if strong and context:
         reasons.append("notable imports in a packed or embedded-image file: "
                        + ", ".join(sorted(set(strong))[:8]))
-    elif api_hits and not {"virtualalloc", "writeprocessmemory",
-                           "createremotethread"} <= low:
-        reasons.append("uses APIs worth noting, though common in ordinary programs: "
-                       + ", ".join(sorted(set(api_hits))[:6]))
+    elif api_hits and not triad:
+        # Present in 98.7% of ordinary binaries -- including the ones that turned out to carry the
+        # triad, which is why the triad is judged above on the full import set rather than on this
+        # line. A fact worth keeping and not worth ranking.
+        notes.append("uses APIs worth noting, though common in ordinary programs: "
+                     + ", ".join(sorted(set(api_hits))[:6]))
+
     for kind in ("url", "registry_run", "scheduled_task", "defender_exclusion", "named_pipe"):
         if iocs.get(kind):
-            reasons.append(f"{kind}: {len(iocs[kind])} found")
+            hit = f"{kind}: {len(iocs[kind])} found"
+            # A URL is in the string table of 99.7% of binaries; the others are not.
+            (notes if kind == "url" else reasons).append(hit)
+
     if strings.get("interesting"):
-        reasons.append(f"{len(strings['interesting'])} suspicious strings")
-    return {"reasons": reasons, "attention": len(reasons)}
+        # Measured at 13% of the corpus, so it is not ubiquitous -- but it is a count of a
+        # heuristic, and a file with 300 "suspicious strings" is usually an application with 300
+        # long string constants. Kept as a note: real, weak, and not a reason to look twice.
+        notes.append(f"{len(strings['interesting'])} suspicious strings")
+
+    return {"reasons": reasons, "notes": notes, "attention": len(reasons)}
 
 
 YARA_TEMPLATE = '''rule {name} {{

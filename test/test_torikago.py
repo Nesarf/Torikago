@@ -846,6 +846,36 @@ class TestReportAndCli(unittest.TestCase):
 
 
 
+
+class TestDataModules(unittest.TestCase):
+    """A PE with no code is a data container, and an empty import table means nothing there."""
+
+    def test_a_codeless_pe_is_not_called_packed(self):
+        # A single .rdata section, no executable section, no imports: the shape ICU ships.
+        data = build_pe(sections=((".rdata", b"\x00" * 4096, SEC_READ),), imports=None)
+        pe = tri.parse_pe(data)
+        self.assertIsNotNone(pe)
+        self.assertFalse(any(s["executable"] for s in pe["sections"]),
+                         "fixture must have no executable section for this test to mean anything")
+        verdict = tri.identify_packer(pe, data, [])
+        self.assertNotIn("likely packed", str(verdict))
+
+    def test_a_codeless_pe_says_what_it_is_instead(self):
+        data = build_pe(sections=((".rdata", b"\x00" * 4096, SEC_READ),), imports=None)
+        pe = tri.parse_pe(data)
+        verdict = tri.identify_packer(pe, data, [])
+        self.assertIn("data module", str(verdict))
+
+    def test_a_code_bearing_pe_with_no_imports_is_still_reported(self):
+        """The other direction: the rule must keep working for the case it was written for."""
+        data = build_pe(sections=((".text", b"\x90" * 4096, SEC_CODE | SEC_EXEC | SEC_READ),),
+                           imports=None)
+        pe = tri.parse_pe(data)
+        self.assertTrue(any(s["executable"] for s in pe["sections"]))
+        verdict = tri.identify_packer(pe, data, [])
+        self.assertIn("likely packed", str(verdict))
+
+
 if __name__ == "__main__":
 
     unittest.main(verbosity=2)
