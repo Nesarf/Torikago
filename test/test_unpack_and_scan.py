@@ -29,9 +29,9 @@ def _load(name: str, filename: str):
     return mod
 
 
-tri = _load("triage", "triage.py")
+tri = _load("torikago", "torikago.py")
 unp = _load("unpack", "unpack.py")
-tt = _load("tt", "test/test_triage.py")     # reuse the PE fixture
+tt = _load("tt", "test/test_torikago.py")     # reuse the PE fixture
 
 
 class TestFactory(unittest.TestCase):

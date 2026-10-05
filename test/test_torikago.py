@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-"""Tests for triage.py.
+"""Tests for torikago.py.
 
 
 
@@ -12,7 +12,7 @@ needs no real malware. A suite that requires samples is a suite that stops being
 
 The synthetic PE is assembled by explicit byte offsets rather than by a single struct
 
-format: the optional header is what triage.py parses, so the fixture must put every
+format: the optional header is what torikago.py parses, so the fixture must put every
 
 field where the parser looks, and hand-counting a 30-field pack string is how fixtures
 
@@ -58,11 +58,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
-spec = importlib.util.spec_from_file_location("triage", HERE.parent / "triage.py")
+spec = importlib.util.spec_from_file_location("torikago", HERE.parent / "torikago.py")
 
 tri = importlib.util.module_from_spec(spec)
 
-sys.modules["triage"] = tri
+sys.modules["torikago"] = tri
 
 spec.loader.exec_module(tri)
 

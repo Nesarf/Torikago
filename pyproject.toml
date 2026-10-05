@@ -3,13 +3,15 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "triage-static"
-version = "0.9.0"
+name = "torikago"
+version = "1.0.0"
 description = "Static triage for an unknown executable: identify, unpack, extract indicators. Never executes the target."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-keywords = ["malware", "triage", "pe", "static-analysis", "yara", "dfir"]
+# The name, plus the category words people actually search for. A codename does not do
+# ambient discovery, so the descriptive terms stay in the metadata rather than in the name.
+keywords = ["malware", "triage", "torikago", "pe", "static-analysis", "yara", "dfir"]
 classifiers = [
   "Environment :: Console",
   "Intended Audience :: Information Technology",
@@ -18,15 +20,15 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-# Nanodesu! is discovered at runtime, never required at install time. `triage` declares no
+# Nanodesu! is discovered at runtime, never required at install time. `torikago` declares no
 # dependencies on purpose: it is meant to run on a machine you do not control, so every
 # dependency it does not have is one less thing a reader has to audit. The PyInstaller half
-# is therefore an extra rather than a requirement -- `pip install triage-static[pyinstaller]`
+# is therefore an extra rather than a requirement -- `pip install torikago[pyinstaller]`
 # makes it turnkey, and the base install stays empty.
 pyinstaller = ["nanodesu>=1.2,<2"]
 
 [project.scripts]
-triage = "triage:main"
+torikago = "torikago:main"
 
 [tool.setuptools]
-py-modules = ["triage"]
+py-modules = ["torikago"]

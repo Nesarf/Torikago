@@ -1,11 +1,21 @@
-# Triage
+# Torikago
 
 Static triage for an unknown executable. It tells you what a file really is, whether it
 is packed, what is inside it, which indicators it carries, and hands you a draft YARA
 rule — **without ever running it**.
 
-The name is provisional; the project follows the same naming habit as `Nanodesu!` and
-`Volcano Separator`, and is easy to rename.
+The name is 鳥籠 — a birdcage. The metaphor is the whole tool: you put something live and
+dangerous in a cage so you can **look at it from a safe distance**, held but in view. Which is
+exactly what this does to an unknown sample, and why the tool refuses to run one.
+
+The category word is still `triage`, and it stays in the description, the keywords and the
+documentation, because a codename does not do ambient discovery — someone searching for a malware
+triage tool should still land here. The name does the distinctive work; the words do the findable
+work.
+
+*Formerly published as `triage-static`.* The old name was a hyphenated compromise: `triage` on
+PyPI was already taken by an unrelated risk-modelling package, so the package could not simply be
+called what it was. `torikago` was free, and states something the old name could not.
 
 ## The safety model, stated up front
 
@@ -21,14 +31,14 @@ Three things this tool therefore does **not** claim:
 
 1. **It is not a sandbox.** A user-mode process cannot contain a kernel-level or
    administrator-level adversary. If a sample must be *run* to be understood, do it in a
-   disposable VM with no network and no shared folders. `triage` prints that instruction
+   disposable VM with no network and no shared folders. `torikago` prints that instruction
    and refuses to take that step itself.
 2. **It is not an antivirus.** Detection means fixing a definition of "malicious", and
    any definition can be bypassed — the reference implementations get bypass tools written
    against them within days. The durable division of labour is: *this tool unpacks and
    reports; an engine with maintained signatures decides.*
 3. **It cannot defeat a runtime packer.** Themida, VMProtect and custom stubs only reveal
-   themselves by running. `triage` names them, records the evidence, and stops.
+   themselves by running. `torikago` names them, records the evidence, and stops.
 
 ## What it does
 
@@ -53,18 +63,18 @@ Three things this tool therefore does **not** claim:
 No third-party dependencies, Python 3.9+.
 
 ```bash
-pip install .                 # provides the `triage` command
-python triage.py --help       # or run it directly
+pip install .                 # provides the `torikago` command
+python torikago.py --help       # or run it directly
 ```
 
-For PyInstaller targets, either install the extra — `pip install triage-static[pyinstaller]` —
-or put `nanodesu.py` somewhere `triage` can find it:
+For PyInstaller targets, either install the extra — `pip install torikago[pyinstaller]` —
+or put `nanodesu.py` somewhere `torikago` can find it:
 
 1. `NANODESU_PATH`, pointing at a file or a directory
 2. an installed `nanodesu` module
-3. `nanodesu.py` next to `triage`, or one directory up
+3. `nanodesu.py` next to `torikago`, or one directory up
 
-`triage` itself declares **no dependencies**, deliberately: it is meant to run on a machine you
+`torikago` itself declares **no dependencies**, deliberately: it is meant to run on a machine you
 do not trust, so every dependency it does not have is one less thing a reader has to audit. The
 PyInstaller half is an extra rather than a requirement for that reason.
 
@@ -81,11 +91,11 @@ versions before 1.3. Either way there is no subprocess and no shell in the middl
 ## Usage
 
 ```bash
-python triage.py suspicious.exe
-python triage.py suspicious.exe -o ./out        # also writes report.json and rule.yar
-python triage.py suspicious.exe --json          # machine-readable on stdout
-python triage.py suspicious.exe --unpack        # actually unpack it, then triage the inside
-python triage.py --scan ./downloads             # which of these files deserves my time?
+python torikago.py suspicious.exe
+python torikago.py suspicious.exe -o ./out        # also writes report.json and rule.yar
+python torikago.py suspicious.exe --json          # machine-readable on stdout
+python torikago.py suspicious.exe --unpack        # actually unpack it, then triage the inside
+python torikago.py --scan ./downloads             # which of these files deserves my time?
 ```
 
 Example summary:
@@ -119,7 +129,7 @@ guarantee survive integration.
 ### ClamAV
 
 ```bash
-python triage.py suspicious.exe --scan-av --unpack
+python torikago.py suspicious.exe --scan-av --unpack
 ```
 
 `--scan-av` runs `clamscan` over the sample and anything the unpack produced, and reports
@@ -130,7 +140,7 @@ scanner never turns into a broken feature.
 ### MISP and STIX
 
 ```bash
-python triage.py suspicious.exe --feed both -o ./out
+python torikago.py suspicious.exe --feed both -o ./out
 ```
 
 | File | Format | Purpose |
@@ -215,8 +225,8 @@ binaries are harder to read on purpose.
 ## Staging a flagged file for a VM
 
 ```bash
-python triage.py suspicious.exe --quarantine ./shuttle
-python triage.py --quarantine-list ./shuttle
+python torikago.py suspicious.exe --quarantine ./shuttle
+python torikago.py --quarantine-list ./shuttle
 ```
 
 A flagged file is **copied** into the shuttle directory with its verdict and the evidence

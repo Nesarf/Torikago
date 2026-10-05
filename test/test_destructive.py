@@ -39,8 +39,8 @@ def _load(name: str, filename: str):
     return mod
 
 
-tri = _load("triage", "triage.py")
-tt = _load("tt4", "test/test_triage.py")
+tri = _load("torikago", "torikago.py")
+tt = _load("tt4", "test/test_torikago.py")
 
 
 def make_mbr(*, ptype=0x07, start_lba=2048, sectors=1_000_000,

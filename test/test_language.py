@@ -34,8 +34,8 @@ def _load(name: str, filename: str):
     return mod
 
 
-tri = _load("triage", "triage.py")
-tt = _load("tt3", "test/test_triage.py")
+tri = _load("torikago", "torikago.py")
+tt = _load("tt3", "test/test_torikago.py")
 
 
 def with_dotnet_layout(base: bytes, *, cli_rva=0x2000, md_rva=0x2100,

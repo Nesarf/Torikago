@@ -32,8 +32,8 @@ def _load(name: str, filename: str):
     return mod
 
 
-tri = _load("triage", "triage.py")
-tt = _load("tt2", "test/test_triage.py")
+tri = _load("torikago", "torikago.py")
+tt = _load("tt2", "test/test_torikago.py")
 
 # The batch argument is literally %~1, so these bodies are concatenated rather than
 # %-formatted: a format string would read %~ as a conversion specifier.
@@ -177,8 +177,8 @@ class TestMisp(unittest.TestCase):
         root = ET.fromstring(tri.build_misp_event(self.report))
         self.assertEqual(root.findtext("Event/published"), "false")
         tags = {t.findtext("name") for t in root.iter("Tag")}
-        self.assertIn("triage:static", tags)
-        self.assertIn("triage:never-executed", tags)
+        self.assertIn("torikago:static", tags)
+        self.assertIn("torikago:never-executed", tags)
 
     def test_no_iocs_still_produces_a_valid_event(self):
         with tempfile.TemporaryDirectory() as t:

@@ -29,8 +29,8 @@ def _load(name: str, filename: str):
     return mod
 
 
-tri = _load("triage", "triage.py")
-tt = _load("tt5", "test/test_triage.py")
+tri = _load("torikago", "torikago.py")
+tt = _load("tt5", "test/test_torikago.py")
 
 SUSPICIOUS_IMPORTS = [("KERNEL32.dll", ["VirtualAlloc", "WriteProcessMemory",
                                         "CreateRemoteThread"])]

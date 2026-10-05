@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Finding Nanodesu!, and what a user is told when it is not there.
 
-`triage` declares no dependencies on purpose: it is a tool meant to be run on a machine you
+`torikago` declares no dependencies on purpose: it is a tool meant to be run on a machine you
 do not control and do not trust, so every dependency it does not have is one less thing a
 reader has to audit. Nanodesu! is therefore discovered at runtime rather than required at
 install time, and the discovery has to be both portable and honest.
