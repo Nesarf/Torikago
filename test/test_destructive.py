@@ -67,6 +67,34 @@ def make_mbr(*, ptype=0x07, start_lba=2048, sectors=1_000_000,
     return bytes(m)
 
 
+def make_lookalike(*, filler=b"\x8d\x8d\x00\xa0\x00\x00", slot=0) -> bytes:
+    """A window shaped like a boot sector but not one.
+
+    Reproduces a real false positive: an ordinary 51 MB remote-desktop DLL (ToDesk's zrtc.dll)
+    was reported as carrying two embedded boot sectors. The bytes at each offset were ordinary
+    x86 code -- the 55 AA sat at offset 510 only because it was the immediate of a `call`
+    instruction (`e8 55 aa`) -- and the "partition table" was one slot whose bytes happened to
+    form a known type with plausible geometry, surrounded by slots holding neither a partition
+    nor an empty slot.
+    """
+    m = bytearray(b"\x90" * 512)
+    entry = bytearray(16)
+    entry[0] = 0x00                  # status
+    entry[1], entry[2], entry[3] = 0x8D, 0x8D, 0x00
+    entry[4] = 0x05                  # a real extended-partition type
+    entry[5], entry[6], entry[7] = 0x00, 0x00, 0x40
+    struct.pack_into("<II", entry, 8, 2509064194, 40912)
+    m[446:462] = entry
+    # The other three slots must NOT read as empty (type 0x00) -- that is the whole point.
+    for k in (1, 2, 3):
+        if k == slot:
+            continue
+        off = 446 + k * 16
+        m[off:off + 16] = (filler * 4)[:16]
+    m[510:512] = b"\x55\xaa"
+    return bytes(m)
+
+
 class TestBootSectorDetection(unittest.TestCase):
     def test_a_real_mbr_is_detected(self):
         hits = tri.find_boot_sector_pattern(make_mbr())
@@ -114,6 +142,35 @@ class TestBootSectorDetection(unittest.TestCase):
         blob[510:512] = b"\x55\xaa"
         self.assertEqual(tri.find_boot_sector_pattern(bytes(blob)), [])
 
+
+    def test_a_lookalike_window_is_not_an_embedded_boot_sector(self):
+        """The false positive, reproduced in shape and portable. One well-formed slot surrounded
+        by slots that are neither partitions nor empty is what ordinary code looks like when it
+        happens to satisfy the signature check -- it is not a partition table."""
+        self.assertEqual(tri.find_boot_sector_pattern(make_lookalike()), [])
+
+    def test_the_lookalike_fires_with_a_permissive_rule(self):
+        """Guards the guard: if this ever stops being a hit under the old shape, the test above
+        has stopped proving anything. Asserts the entry really is well formed on its own."""
+        region = make_lookalike()
+        e = region[446:462]
+        self.assertEqual(e[4], 0x05)
+        self.assertIn(0x05, tri.KNOWN_PARTITION_TYPES)
+        self.assertEqual(region[510:512], b"\x55\xaa")
+
+    def test_a_real_boot_sector_with_empty_slots_still_fires(self):
+        """The other direction. A disk with one partition has three zeroed slots, so requiring
+        every non-empty slot to be well formed must not reject it."""
+        self.assertTrue(tri.find_boot_sector_pattern(make_mbr() + bytes(1024)))
+
+    def test_a_boot_sector_with_several_partitions_still_fires(self):
+        """Two real entries and two empty slots must also pass."""
+        m = bytearray(make_mbr())
+        second = bytearray(m[446:462])
+        struct.pack_into("<II", second, 8, 2_000_000, 500_000)
+        second[4] = 0x83
+        m[462:478] = second
+        self.assertTrue(tri.find_boot_sector_pattern(bytes(m) + bytes(1024)))
 
 class TestDestructiveCapability(unittest.TestCase):
     def _report(self, payload: bytes, imports=None):

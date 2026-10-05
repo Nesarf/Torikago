@@ -238,51 +238,74 @@ def find_boot_sector_pattern(data: bytes, limit: int = 8 << 20) -> list:
         # false positive on an ordinary binary: two bytes reading 55 AA at the right place
         # are common in compressed data, and the byte after the status was 0x24 -- not a
         # partition type at all.
+        # Every one of the four slots must be either a well-formed partition or a well-formed
+        # empty slot. This requirement was missing, and its absence produced an "embedded boot
+        # sector [critical]" on an ordinary 51 MB remote-desktop DLL -- twice.
+        #
+        # The old rule looked for *any* slot that validated and stopped there, so a random window
+        # whose first slot happened to carry a known type and sane-looking geometry was a hit
+        # regardless of what the other three slots held. A real partition table cannot look like
+        # that: an MBR with one partition has three zeroed slots, and the slots sit on a 16-byte
+        # grid that arbitrary code does not respect.
+        #
+        # Measured on both sides before adopting it: five genuine boot sectors (including CHS
+        # variants and four partition types) satisfy it, and both false positives do not.
         entries = []
         for k in range(4):
             e = head[i + 446 + k * 16:i + 462 + k * 16]
             if len(e) < 16:
-                continue
+                entries = []
+                break
             status, ptype = e[0], e[4]
-            if status not in (0x00, 0x80):
-                continue
             if ptype == 0x00:
+                # An empty slot. A disk with one partition still has four entries and three of
+                # them are type 0x00, so this has to be accepted -- but accepted as *empty*
+                # rather than as a partition, which is what the last check below is for.
                 continue
+            if status not in (0x00, 0x80):
+                entries = []
+                break
             if ptype not in KNOWN_PARTITION_TYPES:
-                continue
+                entries = []
+                break
             if e[1] == 0xFF or e[5] == 0xFF:
-                continue      # 0xFF is the field's "unused" value; 0xFE is a legitimate head
+                entries = []
+                break      # 0xFF is the field's "unused" value; 0xFE is a legitimate head
             # Two discriminators, chosen after testing both mistakes:
             #
             # A chance 55 AA window in compressed data carried a valid type byte (0x06) with a
-            # start LBA of 1.7 billion and 2.9 billion sectors, so the geometry has to be
-            # bounded. But requiring the CHS field to agree with the LBA rejected genuine
-            # MBRs, because those fields are legacy and tools leave them at sentinel values.
-            #
-            # So: CHS only has to be in range, the LBA has to be a sane size, and -- the
-            # discriminator that actually separates the two cases -- the boot sector has to
-            # start where boot sectors start. A real one is aligned to its own size.
+            # start LBA of 1.7 billion and 2.9 billion sectors, so the geometry has to be bounded.
+            # But requiring the CHS field to agree with the LBA rejected genuine MBRs, because
+            # those fields are legacy and tools leave them at sentinel values. So CHS only has to
+            # be in range and the LBA has to be a plausible size.
             start_cyl, start_head, start_sector = e[1], e[2], e[3] & 0x3F
             end_cyl = ((e[6] << 2) | (e[7] >> 6)) & 0x3FF
             end_sector = e[7] & 0x3F
             start_lba = int.from_bytes(e[8:12], "little")
             sectors = int.from_bytes(e[12:16], "little")
             if not (0 <= start_cyl <= 1023 and 0 <= end_cyl <= 1023):
-                continue
+                entries = []
+                break
             if not (1 <= end_sector <= 63):
-                continue
+                entries = []
+                break
             if start_sector and not (1 <= start_sector <= 63):
-                continue
-            # No alignment requirement: a boot sector appended to a dropper is not
-            # sector-aligned in the file. The bounded-geometry checks above are what separate
-            # it from chance data.
+                entries = []
+                break
             if not (0 < start_lba < (1 << 32)):
-                continue
+                entries = []
+                break
             if not (0 < sectors < (1 << 32)):
-                continue
+                entries = []
+                break
             if sectors > 4096 * 1024 * 1024 // 512:      # 4 TiB of 512-byte sectors
-                continue
+                entries = []
+                break
             entries.append({"type": hex(ptype), "start_lba": start_lba, "sectors": sectors})
+
+        # At least one slot must actually describe a partition. Everything above establishes
+        # that the slots it looked at are *well formed*; this establishes that there is a
+        # partition table here rather than an empty window that happened to be shaped like one.
         if entries:
             hits.append({"offset": i, "size": 512, "partitions": entries,
                          "sha256": hashlib.sha256(head[i:i + 512]).hexdigest()[:32]})
