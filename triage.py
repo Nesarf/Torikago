@@ -48,7 +48,7 @@ try:
 except ImportError:                                # pragma: no cover - unpack.py ships with us
     unpack_mod = None
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 
 # --------------------------------------------------------------------------- #
 # format identification (magic bytes, because extensions lie)
@@ -528,6 +528,22 @@ def identify_packer(pe: dict, data: bytes, imports: list) -> dict:
     has_exports = bool(pe["directories"].get("export"))
     stub_like = name_is_api_set or (len(data) < 0x10000 and has_exports)
 
+    # A .NET assembly is not packed just because its code section is dense. Managed binaries carry
+    # IL plus metadata in .text, which is far less redundant than native machine code, so they sit
+    # near the top of the entropy range by construction. A real sample measured 7.98 and was
+    # reported as "likely packed" -- which is the kind of false positive that makes a report less
+    # than useless, because the answer was sitting in the COM descriptor the whole time.
+    if pe.get("is_dotnet"):
+        total_imports_net = sum(i["count"] for i in imports)
+        dedup_net = {}
+        for f in findings:
+            dedup_net.setdefault(f["packer"], set()).add(f["evidence"])
+        return {"verdict": sorted(dedup_net)[0] if len(dedup_net) == 1
+                else ("multiple" if dedup_net else "none"),
+                "findings": [{"packer": k, "evidence": sorted(v)} for k, v in dedup_net.items()],
+                "forwarder_or_stub": False,
+                "note": "managed assembly: section entropy says nothing about packing here"}
+
     exec_sections = [s for s in pe["sections"] if s["executable"]]
     high = [s for s in pe["sections"] if s["entropy"] >= HIGH_ENTROPY]
     if exec_sections and len(high) == len(pe["sections"]):
@@ -758,6 +774,13 @@ def extract_iocs(data: bytes, limit: int = 400) -> dict:
     for kind, pat in IOC_PATTERNS:
         seen, vals = set(), []
         for m in pat.finditer(data):
+            # A .NET assembly is full of version strings shaped exactly like IPv4 literals:
+            # "mscorlib, Version=4.0.0.0" produced five indicator hits on a managed sample whose
+            # real network surface is unrelated. The tell is the word before it.
+            if kind == "ipv4":
+                before = data[max(0, m.start() - 14):m.start()].lower()
+                if b"version" in before:
+                    continue
             v = m.group(0).decode("latin1", "replace").strip()
             if not v or v in seen:
                 continue
@@ -1543,6 +1566,8 @@ def build_report(path: Path, out_dir: Path | None, *, max_bytes: int = DEFAULT_M
     kind = identify(data, path)
     pe = parse_pe(data) if kind["kind"] == "pe" else None
     imports = parse_imports(data, pe) if pe else []
+    if pe:
+        pe["is_dotnet"] = is_dotnet(pe, data) is not None
     packer = identify_packer(pe, data, imports) if pe else {"verdict": "n/a", "findings": []}
     strings = extract_strings(data)
     iocs = extract_iocs(data)
