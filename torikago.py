@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.14.4"
+_SOURCE_VERSION = "1.15.0"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -473,6 +473,15 @@ def parse_pe(data: bytes) -> dict | None:
         }
     except (struct.error, IndexError):
         return None
+    except MemoryError:
+        # A hostile file can describe a section whose `rawptr + rawsize` is enormous. The bound check
+        # keeps the slice itself safe, but the arithmetic happens before it, and the whole point is
+        # that a malformed input must not take the tool down. Reaching here means the file asked for
+        # something unreasonable, which is itself a finding -- so `None` would lose it, and the
+        # caller distinguishes a non-PE from a PE it could not read.
+        return {"machine": "unknown", "bits": None, "unreadable": True,
+                "reason": "the section table described an extent too large to address",
+                "sections": [], "directories": {}, "characteristics": 0}
 
 
 def rva_to_offset(pe: dict, rva: int) -> int | None:
@@ -480,6 +489,14 @@ def rva_to_offset(pe: dict, rva: int) -> int | None:
         if s["vaddr"] <= rva < s["vaddr"] + max(s["vsize"], s["rawsize"]):
             return s["rawptr"] + (rva - s["vaddr"])
     return None
+
+
+# Parser safety caps. Named and referenced in the result rather than repeated as literals, because a
+# cap that a consumer cannot see is indistinguishable from a file that simply had less in it.
+DESCRIPTOR_CAP = 256          # import descriptors
+FUNC_CAP = 512                # thunks per descriptor
+NAME_CAP = 200                # names kept per descriptor
+ORDINAL_BIT = 1 << 63         # 64-bit: bit 63 marks "imported by ordinal"
 
 
 def parse_imports(data: bytes, pe: dict) -> list:
@@ -492,7 +509,8 @@ def parse_imports(data: bytes, pe: dict) -> list:
     if off is None:
         return []
     out = []
-    for i in range(256):
+    descriptor_limited = False
+    for i in range(DESCRIPTOR_CAP):
         base = off + i * 20
         if base + 20 > len(data):
             break
@@ -508,28 +526,57 @@ def parse_imports(data: bytes, pe: dict) -> list:
         funcs = []
         thunk_rva = oft or first_thunk
         toff = rva_to_offset(pe, thunk_rva)
+        thunk_limited = False
         if toff is not None:
             step = 8 if is64 else 4
             fmt = "<Q" if is64 else "<I"
-            for k in range(512):
+            for k in range(FUNC_CAP):
                 p = toff + k * step
                 if p + step > len(data):
                     break
                 val = struct.unpack_from(fmt, data, p)[0]
                 if val == 0:
                     break
-                if val & (1 << (63 if is64 else 31)):
+                if val & (ORDINAL_BIT if is64 else (1 << 31)):
                     continue                      # imported by ordinal
-                no = rva_to_offset(pe, val & 0x7FFFFFFF)
+                # Only the 32-bit form needs a mask: its high bit is the ordinal flag, already tested
+                # above. For 64-bit the flag is bit 63, so an RVA is the whole value -- and masking it
+                # to 31 bits truncated any import above 2 GB into a wrong offset or a silent None.
+                rva = val if is64 else (val & 0x7FFFFFFF)
+                no = rva_to_offset(pe, rva)
                 if no is None:
                     continue
                 end = data.find(b"\x00", no + 2, no + 2 + 128)
                 nm = data[no + 2:end if end > 0 else no + 40].decode("latin1", "replace")
                 if nm:
                     funcs.append(nm)
-        out.append({"dll": dll, "functions": funcs[:200], "count": len(funcs)})
+            else:
+                # The loop ran to completion, so the cap is what stopped it -- unless the next entry
+                # is the terminator or past the end, in which case there was nothing more to read.
+                nxt = toff + FUNC_CAP * step
+                if nxt + step <= len(data):
+                    thunk_limited = struct.unpack_from(fmt, data, nxt)[0] != 0
+        entry = {"dll": dll, "functions": funcs[:NAME_CAP], "count": len(funcs)}
+        if len(funcs) > NAME_CAP:
+            # The list is capped while `count` is not, so the two disagreed: a consumer reading
+            # count=250 beside a 200-element array has no way to know which to believe.
+            entry["functions_truncated"] = True
+            entry["functions_limit"] = NAME_CAP
+            entry["functions_found"] = len(funcs)
+        if thunk_limited:
+            entry["thunks_truncated"] = True
+            entry["thunks_limit"] = FUNC_CAP
+        out.append(entry)
         if not dll and not funcs:
             break
+    else:
+        # The descriptor loop reached its cap rather than the null terminator, so the import list is
+        # incomplete. TRUNCATION is not the same as "the file imports nothing more", and a consumer
+        # told only the latter will read a missing name as evidence of absence.
+        descriptor_limited = True
+    if descriptor_limited:
+        out.append({"truncated": True, "limit": DESCRIPTOR_CAP,
+                    "reason": "parser_safety_cap"})
     return out
 
 

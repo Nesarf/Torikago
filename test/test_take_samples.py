@@ -22,6 +22,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import _fixtures                                      # noqa: E402
+
 spec = importlib.util.spec_from_file_location("ts", HERE.parent / "take_samples.py")
 ts = importlib.util.module_from_spec(spec)
 sys.modules["ts"] = ts
@@ -80,15 +82,7 @@ class TestWhatIsAlreadySealed(unittest.TestCase):
     def test_the_vault_is_read_from_its_filenames(self):
         """Every artifact is named by its own content hash, which is why this is a directory listing
         rather than a database lookup -- a sealed artifact identifies itself."""
-        import tempfile
-        # NOT Path.home(): that is on C:, and TempPath discipline aside, a fixture for a tool that
-        # refuses C: should not itself live there. Built from chr(92) because writing Windows paths
-        # through a shell heredoc has corrupted this repository repeatedly.
-        import os
-        bs = chr(92)
-        allowed = Path(os.environ.get("TRIAGE_TEST_TMP") or ("E:" + bs + "triage-test-tmp"))
-        allowed.mkdir(parents=True, exist_ok=True)
-        base = Path(tempfile.mkdtemp(prefix="ts-", dir=str(allowed)))
+        base = _fixtures.tmpdir("ts-")
         self.addCleanup(lambda: __import__("shutil").rmtree(base, ignore_errors=True))
         (base / ("a" * 64 + ".zip")).write_bytes(b"PK")
         (base / "not-a-hash.zip").write_bytes(b"PK")

@@ -30,6 +30,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import _fixtures                                      # noqa: E402
+
 fspec = importlib.util.spec_from_file_location("sf", HERE.parent / "sample_fetch.py")
 sf = importlib.util.module_from_spec(fspec)
 sys.modules["sf"] = sf
@@ -44,22 +46,8 @@ HAVE_PYZIPPER = sv.pyzipper is not None
 
 
 def tmpdir():
-    """A temporary directory outside every path the tool refuses.
-
-    Neither obvious base works here, which took a diagnostic to establish rather than a guess:
-    `tempfile.mkdtemp()` resolves to `TEMP`, which on this machine is the refused cache area, and
-    `Path.home()` is on `C:`. **Both candidates were forbidden**, so the fixtures failed no matter
-    how they were written, and the failures looked like the check being wrong rather than the
-    fixture being in the wrong place.
-
-    The path is assembled from `chr(92)` because writing it literally through a shell heredoc has
-    corrupted this repository repeatedly -- the two characters before `triage` become a tab.
-    """
-    bs = chr(92)
-    default = "E:" + bs + "triage-test-tmp"
-    base = Path(os.environ.get("TRIAGE_TEST_TMP") or default)
-    base.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix="channels-", dir=str(base)))
+    """Delegated, because the root has to be chosen per machine -- see `_fixtures`."""
+    return _fixtures.tmpdir("channels-")
 
 
 class TestRefusalsComeBeforeAnyNetworkCall(unittest.TestCase):
