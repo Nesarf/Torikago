@@ -252,12 +252,56 @@ def fetch_malwarebazaar(sha: str, *, fetch_bytes: bool, dest: Path, auth_key: st
     return result
 
 
+def _list_by_tag(tag: str, auth_key, *, limit: int = 20) -> int:
+    """What MalwareBazaar holds under a tag, as a table. Never downloads.
+
+    Exists so browsing a collection does not require committing to a sample. The first corpus built
+    for this tool was chosen one hash at a time from search results, and several of those turned out
+    to be archives the unpacker cannot read -- which is the kind of thing a listing makes visible
+    before anything is taken.
+    """
+    import urllib.parse
+
+    body = urllib.parse.urlencode({"query": "get_taginfo", "tag": tag, "limit": limit}).encode()
+    req = urllib.request.Request("https://mb-api.abuse.ch/api/v1/", data=body, headers=(
+        {"Auth-Key": auth_key} if auth_key else {}))
+    try:
+        with urllib.request.urlopen(req, timeout=180) as fh:
+            payload = json.load(fh)
+    except (urllib.error.URLError, ValueError) as exc:
+        print("failed: %s" % exc)
+        return 1
+    if payload.get("query_status") != "ok":
+        print("failed: MalwareBazaar said %r" % payload.get("query_status"))
+        return 1
+    rows = payload.get("data") or []
+    print("tag %r: %d sample(s)" % (tag, len(rows)))
+    print()
+    print("  %-18s %-6s %11s  %-19s %s" % ("sha256", "type", "size", "first_seen", "name"))
+    for r in rows:
+        print("  %-18s %-6s %11s  %-19s %s" % (
+            (r.get("sha256_hash") or "")[:16], r.get("file_type") or "?",
+            r.get("file_size"), (r.get("first_seen") or "")[:19],
+            (r.get("file_name") or "")[:30]))
+    types = {}
+    for r in rows:
+        types[r.get("file_type")] = types.get(r.get("file_type"), 0) + 1
+    print()
+    print("  types: %s" % ", ".join("%s=%d" % kv for kv in sorted(types.items())))
+    print()
+    print("To look one up:  sample_fetch.py <full sha256>")
+    print("To take one:     sample_fetch.py <full sha256> --fetch")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="fetch-sample",
         description="Fetch research samples into a quarantine directory. Metadata by default; "
                     "bytes only with --fetch. Never executes anything.")
-    ap.add_argument("hash", help="md5, sha1 or sha256 of the sample to look up")
+    ap.add_argument("hash", nargs="?",
+                    help="md5, sha1 or sha256 of the sample to look up. Not needed with --tag or "
+                         "--quota, which are browsing commands")
     ap.add_argument("--dest", default=r"E:\Quarantine\samples",
                     help="where samples land. The default is a suggestion, not an assumption -- "
                          "this tool has no idea where you keep them, and refuses any destination "
@@ -265,11 +309,21 @@ def main(argv=None) -> int:
     ap.add_argument("--fetch", action="store_true",
                     help="actually download the bytes. Without this only metadata is retrieved, "
                          "which cannot execute and usually answers the question")
-    ap.add_argument("--source", default="malwarebazaar", choices=("malwarebazaar",))
+    ap.add_argument("--source", default="malwarebazaar",
+                    choices=("malwarebazaar", "malshare"),
+                    help="which collection to ask. Both are free; MalwareBazaar needs an abuse.ch "
+                         "Auth-Key, MalShare needs MALSHARE_TOKEN")
+    ap.add_argument("--tag", metavar="TAG",
+                    help="instead of a hash: list what MalwareBazaar holds under this tag "
+                         "(metadata only, never downloads)")
+    ap.add_argument("--quota", action="store_true",
+                    help="with --source malshare: report the key's remaining daily requests")
     ap.add_argument("--auth-key", default=os.environ.get("MALWAREBAZAAR_AUTH_KEY"),
                     help="abuse.ch Auth-Key (or set MALWAREBAZAAR_AUTH_KEY). Required by the "
                          "endpoint since it moved behind auth; never stored next to samples")
     ap.add_argument("--log", default=r"E:\Quarantine\fetch\fetches.jsonl")
+    ap.add_argument("--limit", type=int, default=20,
+                    help="rows to list with --tag (default 20)")
     args = ap.parse_args(argv)
 
     dest = Path(args.dest)
@@ -277,12 +331,46 @@ def main(argv=None) -> int:
     # hash, then whether a key even exists -- so a caller with two problems learns about both
     # instead of fixing one and being told about the next.
     check_destination(dest)                      # before any network call, so a mistake costs nothing
-    if not args.auth_key:
+    # MalShare reports its own quota, so a caller can see the budget before spending an attempt.
+    if args.quota or (args.source == "malshare" and args.quota):
+        import provider_malshare as ms
+        key = ms.find_auth_key(args.auth_key)
+        if not key:
+            print("[!] --quota needs MALSHARE_TOKEN (or --auth-key). "
+                  "Register at https://malshare.com/register.php")
+            return 1
+        q = ms.quota(key)
+        if not q.get("ok"):
+            print("failed: %s" % q.get("reason"))
+            return 1
+        print("malshare quota: %s" % q.get("raw"))
+        if "remaining" in q:
+            print("  allocated %s, remaining %s" % (q.get("allocated"), q.get("remaining")))
+        return 0
+
+    if args.tag:
+        # Listing is metadata only, always. There is no flag that turns this into a download,
+        # because browsing a collection and taking from it are different acts.
+        return _list_by_tag(args.tag, args.auth_key, limit=args.limit)
+
+    if not args.hash:
+        # `--tag` and `--quota` are browsing commands and provide their own subject; anything else
+        # needs a hash, and saying so once here is clearer than an argparse error that lists the
+        # whole usage block.
+        print("no hash given, and no browsing command asked for. Provide a hash, --tag TAG, or "
+              "--quota", file=sys.stderr)
+        return 1
+
+    if not args.auth_key and args.source == "malwarebazaar":
         # Reported before the hash is validated, so a caller with two problems learns about both in
         # one run instead of fixing one and discovering the next.
         print("[!] no auth-key. abuse.ch now requires one:")
         print("      register at https://auth.abuse.ch/ (OAuth: X / Google / LinkedIn / GitHub)")
         print("      then:  set MALWAREBAZAAR_AUTH_KEY=<key>")
+        print()
+    if args.source == "malshare" and not args.auth_key:
+        print("[!] no MalShare token. Register at https://malshare.com/register.php and:")
+        print("      export MALSHARE_TOKEN=<token>")
         print()
     kind = classify_hash(args.hash)
     state = protection_state()
@@ -298,8 +386,25 @@ def main(argv=None) -> int:
 
     if not args.auth_key:
         print("auth-key    : none given -- the query endpoint now requires one (auth.abuse.ch)")
-    result = fetch_malwarebazaar(args.hash, fetch_bytes=args.fetch, dest=dest,
-                                 auth_key=args.auth_key)
+    if args.source == "malshare":
+        import provider_malshare as ms
+        key = ms.find_auth_key(args.auth_key)
+        if not key:
+            print("failed: no MalShare token (set MALSHARE_TOKEN or pass --auth-key)")
+            return 1
+        if args.fetch:
+            result = ms.fetch_bytes(key, args.hash, dest)
+            if result.get("ok"):
+                result.setdefault("note", "")
+        else:
+            result = ms.details(key, args.hash)
+            result["downloaded"] = False
+            if result.get("ok"):
+                result["note"] = ("metadata only; pass --fetch to download the bytes. Metadata "
+                                  "cannot execute.")
+    else:
+        result = fetch_malwarebazaar(args.hash, fetch_bytes=args.fetch, dest=dest,
+                                     auth_key=args.auth_key)
 
     record = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
               "query_hash": args.hash, "hash_kind": kind, "source": args.source,

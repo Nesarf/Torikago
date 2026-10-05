@@ -259,3 +259,80 @@ class TestTheToolsAreReachableFromTheTool(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestBrowsingIsSeparateFromTaking(unittest.TestCase):
+    """A listing that could download would make browsing and acquiring the same act."""
+
+    def test_tag_listing_downloads_nothing(self):
+        import inspect
+        src = inspect.getsource(sf._list_by_tag)
+        self.assertIn("get_taginfo", src)
+        # Checked against the calls that download, not against the string "--fetch". The listing
+        # prints "--fetch" as instructions, and an earlier version of this test failed on its own
+        # help text -- the same "measuring the prose instead of the behaviour" mistake in a new
+        # costume.
+        for forbidden in ("get_file", "getfile", "urlretrieve", "urlopen(url"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, src,
+                                 "the listing path can download, so browsing is not separate")
+
+    def test_the_listing_says_how_to_take_one(self):
+        import inspect
+        src = inspect.getsource(sf._list_by_tag)
+        self.assertIn("--fetch", src, "the listing must say how to act on what it shows")
+
+    def test_a_hash_is_not_required_for_a_browsing_command(self):
+        parser_src = Path(HERE.parent / "sample_fetch.py").read_text(encoding="utf-8")
+        self.assertIn('nargs="?"', parser_src)
+
+    def test_no_hash_and_no_browsing_command_says_so_plainly(self):
+        src = Path(HERE.parent / "sample_fetch.py").read_text(encoding="utf-8")
+        self.assertIn("no browsing command asked for", src)
+
+
+class TestTheSecondProviderFollowsTheSameRules(unittest.TestCase):
+    """Adding a provider must not route around the checks the first one is subject to."""
+
+    def test_its_key_comes_from_the_environment_and_can_be_overridden(self):
+        import provider_malshare as ms
+        old = os.environ.get("MALSHARE_TOKEN")
+        try:
+            os.environ["MALSHARE_TOKEN"] = "abc"
+            self.assertEqual(ms.find_auth_key(None), "abc")
+            self.assertEqual(ms.find_auth_key("explicit"), "explicit")
+        finally:
+            if old is None:
+                os.environ.pop("MALSHARE_TOKEN", None)
+            else:
+                os.environ["MALSHARE_TOKEN"] = old
+
+    def test_a_hash_mismatch_deletes_the_download(self):
+        """MalShare serves samples raw rather than zipped, so the hash is directly checkable -- and
+        a file filed under a hash it does not have is worse than no file."""
+        import inspect
+        import provider_malshare as ms
+        src = inspect.getsource(ms.fetch_bytes)
+        self.assertIn("do not match the hash", src)
+        self.assertIn("unlink", src)
+
+    def test_it_reports_that_a_download_is_still_executable(self):
+        import inspect
+        import provider_malshare as ms
+        src = inspect.getsource(ms.fetch_bytes)
+        self.assertIn("still executable", src,
+                      "MalwareBazaar serves a password-protected zip; MalShare does not, and the "
+                      "difference matters to whoever handles the file next")
+
+    def test_quota_is_readable_before_spending_an_attempt(self):
+        import provider_malshare as ms
+        self.assertTrue(hasattr(ms, "quota"))
+
+    def test_the_destination_check_still_runs_first(self):
+        """Every refusal happens before a provider is consulted, so a second provider cannot be a
+        way around them."""
+        import inspect
+        src = inspect.getsource(sf.main)
+        self.assertLess(src.index("check_destination"),
+                        src.index("provider_malshare"),
+                        "the destination check moved after the provider is reached")
