@@ -34,25 +34,55 @@ sealed form already handles. What needs isolation is the unsealing.
 
 | option | disposable | host filesystem | needs an ISO | notes |
 |---|---|---|---|---|
-| **Windows Sandbox** | **yes** — closed window deletes everything | **no** (read-only mounts at best) | **no** | Windows Pro/Enterprise; best fit here |
-| Hyper-V VM | yes, with a snapshot discipline | no, if you disable checkpoints/shared folders | yes | more control, more setup |
-| WSL | **no** | **shares the host filesystem** | no | convenient, **not an isolation boundary** |
+| **Windows Sandbox** | **yes** — closed window deletes everything | **no** (read-only mounts at best) | **no** | **Pro / Enterprise / Education only** |
+| Hyper-V VM | yes, with snapshot discipline | no, if checkpoints and shared folders are off | yes | **also Pro and above** |
+| VirtualBox / VMware | yes, with snapshot discipline | no, if shared folders are off | yes | **works on Home** — the pragmatic answer here |
+| WSL | **no** | **shares the host filesystem** | no | **not an isolation boundary, by Microsoft's own statement** |
 | A folder | no | — | — | it is a folder |
 
-**WSL is named here because it is the tempting mistake**: it shares the network and the filesystem, so
-a sample inside it reaches the host through `/mnt/c` and through the network namespace. It is a fine
-place to run Linux malware analysis; **it is not a place to run something you are containing.**
+### Measured on this machine, 2026-10-06
 
-Check what this machine has:
+**The table above is generic. This machine's actual situation is narrower:**
 
-```powershell
-Get-WindowsOptionalFeature -Online -FeatureName WindowsSandbox
-```
+* **Windows 11 Home, build 26200.** `Get-WindowsOptionalFeature -Online -FeatureName
+  Containers-DisposableClientVM` returns **nothing at all** — not an error, not a state. On Home the
+  feature does not exist, so there is nothing to enable and no reboot that would help. **Windows
+  Sandbox and Hyper-V are both unavailable for that reason**, not for a lack of privilege.
+* **Virtualisation itself is fine**: `HypervisorPresent: True`, and WSL2 runs a distro
+  (`wsl --status` → version 2). So the hardware and the platform are capable; only the
+  disposable-Windows component is missing.
+* **WSL is present and is therefore the temptation.** It has its own network namespace
+  (`eth1 172.21.236.218/24`) — so the isolation is more real than "a folder" — but three things rule
+  it out for this purpose, and the third is decisive:
 
-`Enabled` and you are done. Otherwise it needs the feature turned on **and a reboot** — a system change
-worth making deliberately rather than as a side effect of wanting to look at one file.
+  1. **Microsoft states WSL is not a security boundary**, and does not service vulnerabilities that
+     cross it. An isolation the vendor will not stand behind is one you are relying on alone.
+  2. **`/mnt/c` maps the host filesystem**, and interop can start Windows programs from the Linux side.
+  3. **This WSL is a working environment** — a named distro with systemd running and development
+     configuration. A container for samples should be one that has never held anything else.
+
+**Conclusion for this machine: there is no available disposable isolation for Windows PE samples.**
+The workflow below still describes the shape; the container it needs has to come from somewhere else.
 
 ---
+
+## 1b. If no disposable isolation is available
+
+**Do not unseal.** A sealed artifact is inert and useful — `nanodesu` cannot read inside it, but
+`--handoff` can be pointed at the sealed zip, and the corpus can record its metadata. What is given up
+is the static unpacking, which is real but is not worth doing on a machine you also browse from.
+
+**The options that would restore it**, roughly in order of effort:
+
+* **VirtualBox or VMware Workstation Player** — both work on Home, both are free for this use, and
+  both give a snapshot to revert rather than files to delete. This is the shortest path from here.
+* **A second physical machine**, or a spare SSD in this one, with a clean Windows install. Nothing
+  beats a genuinely separate computer, and an offline one is better still.
+* **Windows Pro** — the upgrade that makes Sandbox and Hyper-V exist. Worth stating plainly that it
+  costs money, because "enable a feature" and "buy a licence" are different decisions.
+
+**What is not an option, however convenient:** unsealing on the host and being careful. Care is not a
+containment mechanism, and the failure mode is a single double-click.
 
 ## 2. Take the network away — this is the step people skip
 
