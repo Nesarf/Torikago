@@ -53,6 +53,27 @@ attacking:
 
 ## Claims this tool will not make, even if asked to
 
+**These travel with the result, not only in this file.** `BOUNDARY_NOTICE` (`security_posture.py`) is
+attached to every return path including the error paths, and `--posture` prints it. Read it with:
+
+```bash
+python torikago.py --posture
+```
+
+The error-path part is deliberate: a failed query returning an empty list looks a great deal like
+"nothing found", and that is exactly when the notice matters most.
+
+**`--posture` is read-only and that is asserted, not promised.** No `Set-MpPreference`,
+`Add-MpPreference`, `Remove-MpPreference`, `Set-MpComputerStatus` or `Stop-Service` appears in the
+source and a test fails if one is added. A report that can modify what it reports on is not a report.
+
+**And it is not an antivirus.** Real-time interception, behavioural blocking and kernel-level defence
+are not observable from a static read, so claiming that role would promise coverage it cannot deliver
+— and a user who believed it would end up **less** protected than one who never heard the claim. Per
+`RESEARCH_MODE.md`, the one part of that job this does take on is the part a security centre is built
+to skip: **preserving evidence instead of destroying it.**
+
+
 These are not limitations to be worked around later. They are the properties that make the tool
 trustworthy, and weakening one would make it worse rather than more capable.
 
