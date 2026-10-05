@@ -105,6 +105,10 @@ python torikago.py --scan ./downloads --scan-only exe,dll --scan-limit 500
 python torikago.py --corpus-write ./downloads --corpus-file corpus/manifest.jsonl
 python torikago.py --corpus-check corpus/manifest.jsonl
 python torikago.py --corpus-verify corpus/manifest.jsonl --corpus-root /d
+
+python torikago.py --fetch-sample <sha256>          # metadata only; --fetch-bytes to download
+python torikago.py --vault-store sample.bin --dest /your/vault
+python torikago.py --vault-list /your/vault
 ```
 
 Every flag above is listed on purpose. Three of them shipped for several versions with no mention
@@ -245,6 +249,42 @@ cannot find a new class. **An instrument nothing reads is a pile.**
 **It cannot measure false negatives.** The corpus holds legitimate software, so it can show that a
 detector still does not cry wolf; it says nothing about what a detector would miss. That needs samples
 this corpus deliberately does not contain.
+
+## Getting a sample, and keeping it
+
+```bash
+python torikago.py --fetch-sample <sha256>                 # metadata only
+python torikago.py --fetch-sample <sha256> --fetch-bytes   # then the bytes, if worth having
+python torikago.py --vault-store sample.bin --dest /your/vault
+python torikago.py --vault-list /your/vault
+```
+
+**Metadata is the default and bytes are opt-in.** A hash, a family name and a file type cannot
+execute, and they usually answer the only question that matters first: *is this sample worth having?*
+
+### Why a vault at all
+
+An EICAR test string was written to a quarantine directory, `ls` showed it, and **reading it returned
+`Errno 22`** — Windows refusing a file it had judged, with Defender's history holding two detections
+of that path. **The sample existed and was unreadable**, removed from usefulness by the protection
+that is supposed to be on your side. That is not a fault in the antivirus: destroying detected
+malware is correct behaviour, and exactly wrong for research.
+
+So samples are kept as **AES-encrypted zips**, named by their own sha256, which a scanner cannot look
+inside. `pip install torikago[vault]` provides the encryption, and **there is no fallback** — the
+standard library will happily set the encrypted bit and write plaintext, and a container that only
+*looks* encrypted is worse than none.
+
+**`--vault-list` reports `encrypted=unknown` when it cannot check**, rather than `False`. Its first
+version reported a genuinely sealed archive as unencrypted because `pyzipper` was missing from the
+interpreter: **a confident statement produced by an inability to read.**
+
+### Destinations are refused, not sanitised
+
+Samples are never written inside the workspace, the cache area, a git repository, or on `C:`. Each
+refusal is a specific way this goes wrong: **a sample in a repository gets committed eventually**, and
+one on the system drive survives a machine being handed on. The default destination is described in
+the tool as **a suggestion rather than an assumption** — it has no idea where you keep samples.
 
 ## Signals are graded, and the grading is the point
 

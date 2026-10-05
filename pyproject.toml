@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torikago"
-version = "1.8.0"
+version = "1.9.0"
 description = "Static triage for an unknown executable: identify, unpack, extract indicators. Never executes the target."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -26,6 +26,10 @@ classifiers = [
 # is therefore an extra rather than a requirement -- `pip install torikago[pyinstaller]`
 # makes it turnkey, and the base install stays empty.
 pyinstaller = ["nanodesu>=1.2,<2"]
+# The sample vault needs real AES, and the standard library cannot write encrypted zip members --
+# it will happily set the encrypted bit and write plaintext. So this is an extra rather than
+# something worked around, and its absence is a reported failure rather than a silent downgrade.
+vault = ["pyzipper>=0.3.6"]
 
 [project.scripts]
 torikago = "torikago:main"
@@ -45,4 +49,13 @@ Changelog = "https://github.com/Nesarf/Torikago/releases"
 # the module the flag delegates to simply was not there. Found by installing from PyPI and
 # importing, which is the only check that would have caught it -- the local tree has the
 # file, so every local test passed.
-py-modules = ["torikago", "unpack", "corpus", "corpus_verify", "security_posture", "product_registration"]
+py-modules = [
+    "torikago",
+    "unpack",
+    "corpus",
+    "corpus_verify",
+    "security_posture",
+    "product_registration",
+    "sample_fetch",
+    "sample_vault",
+]

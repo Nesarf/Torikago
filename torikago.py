@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.8.0"
+_SOURCE_VERSION = "1.9.0"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -2564,6 +2564,24 @@ def main(argv=None) -> int:
                          "(default: DIR/manifest.jsonl)")
     ap.add_argument("--corpus-check", metavar="PATH",
                     help="load a manifest and report what it holds")
+    ap.add_argument("--fetch-sample", metavar="HASH",
+                    help="look a sample hash up in MalwareBazaar and report the metadata. Bytes are "
+                         "opt-in with --fetch-bytes. Needs an abuse.ch Auth-Key")
+    ap.add_argument("--fetch-bytes", action="store_true",
+                    help="with --fetch-sample, actually download. Metadata cannot execute and is "
+                         "usually enough to decide whether the sample is worth having")
+    ap.add_argument("--vault-store", metavar="FILE",
+                    help="seal a file into the vault as an AES-encrypted zip, so an active "
+                         "antivirus cannot delete the evidence")
+    ap.add_argument("--vault-list", metavar="DIR", nargs="?", const="",
+                    help="list what a vault holds and whether each artifact is genuinely sealed")
+    ap.add_argument("--vault-extract", metavar="ARCHIVE",
+                    help="unseal one artifact into --work (never in place; delete the work "
+                         "directory afterwards)")
+    ap.add_argument("--work", metavar="DIR",
+                    help="a directory you will delete, for --vault-extract")
+    ap.add_argument("--dest", metavar="DIR",
+                    help="where samples land, for the vault commands")
     ap.add_argument("--corpus-verify", metavar="PATH",
                     help="re-measure --corpus-root and report how the verdicts differ from the "
                          "manifest. Reports differences; does not judge them")
@@ -2658,6 +2676,35 @@ def main(argv=None) -> int:
         for line in state.get("boundary_notice", []):
             print("  - %s" % line)
         return 0
+
+    if args.fetch_sample:
+        import sample_fetch as sf
+
+        argv = [args.fetch_sample]
+        if args.fetch_bytes:
+            argv.append("--fetch")
+        if args.dest:
+            argv += ["--dest", args.dest]
+        return sf.main(argv)
+
+    if args.vault_store or args.vault_list is not None or args.vault_extract:
+        import sample_vault as sv
+
+        if args.vault_store:
+            extra = ["--dest", args.dest] if args.dest else []
+            return sv.main(["store", args.vault_store] + extra)
+        if args.vault_extract:
+            if not args.work:
+                print("--vault-extract needs --work DIR (a directory you will delete)",
+                      file=sys.stderr)
+                return 1
+            return sv.main(["extract", args.vault_extract, "--work", args.work])
+        # The directory the caller gave is the one to list. The first version dropped it and fell
+        # back to the default, so `--vault-list /some/other/vault` silently described
+        # E:\Quarantine\samples instead -- a wrong answer to the question asked, which is worse
+        # than no answer.
+        target = args.vault_list or args.dest
+        return sv.main(["list"] + (["--dest", target] if target else []))
 
     if args.corpus_verify:
         if not args.corpus_root:
