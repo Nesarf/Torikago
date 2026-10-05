@@ -97,6 +97,35 @@ is the static unpacking, which is real but is not worth doing on a machine you a
 * **Windows Pro** — the upgrade that makes Sandbox and Hyper-V exist. Worth stating plainly that it
   costs money, because "enable a feature" and "buy a licence" are different decisions.
 
+### Setting the isolation up on this machine — measured, 2026-10-06
+
+**VirtualBox 7.2.20**, verified before it is run: the installer's SHA256 matches Oracle's published
+`SHA256SUMS` (`a81777d2…2c26`) **and** its Authenticode signature is `CN="Oracle America, Inc."` from
+`DigiCert Trusted G4`, status Valid. **Both checks, because a hash from the vendor and a signature from
+the vendor are two different claims.**
+
+**A prerequisite that is easy to miss:** this machine already runs a hypervisor
+(`HyperVisorPresent: True`, WSL2 active), so VirtualBox must go through WHP. Checked: the
+`HypervisorPlatform` feature **exists here and is available**, currently `Disabled`.
+
+```
+dism /online /enable-feature /featurename:HypervisorPlatform /all /norestart
+shutdown /r /t 0
+```
+
+**`HypervisorPlatform` is the hypervisor API for applications, not Hyper-V itself** — enabling it does
+not hand the machine over, it lets VirtualBox borrow the path. `Microsoft-Hyper-V-All` is the feature
+that does not exist on Home.
+
+**And the real constraint is memory, not disk.** Measured: **15.9 GB total, 2.4 GB available**, with
+`java` holding 3.49 GB and four `chrome` processes holding 1.48 GB between them. **2.4 GB cannot start
+any usable virtual machine**, and running a guest beside this workload slows both sides. So the order
+is: install, then **free memory**, then create the VM — not install-and-try.
+
+**The guest needs a Windows image**, and it has to be a *clean* one. That is a 5–20 GB download and the
+one part of this that cannot be avoided: **a virtual machine is only as clean as the image it was
+installed from.** Place the VM's disk on `E:` (89 GB free) — **not `F:` (17 GB)**, and never `C:`.
+
 **What is not an option, however convenient:** unsealing on the host and being careful. Care is not a
 containment mechanism, and the failure mode is a single double-click.
 
