@@ -50,8 +50,21 @@ def tmpdir():
     return _fixtures.tmpdir("channels-")
 
 
+def require_root():
+    return _fixtures.require_root()
+
+
+@unittest.skipUnless(os.name == "nt",
+                     "the destination rules are Windows rules -- `C:`, drive letters, and the "
+                     "workspace/cache convention they name. Asserting them on POSIX would either "
+                     "pass vacuously or test something other than what ships, and a skip says which.")
 class TestRefusalsComeBeforeAnyNetworkCall(unittest.TestCase):
-    """A mistake should cost nothing, which means being caught locally."""
+    """A mistake should cost nothing, which means being caught locally.
+
+    **The refusals are platform-specific on purpose.** `C:` is not a path, it is a class of mistake --
+    a sample on the system drive outliving the machine it was collected for. On a host where that
+    concept does not exist there is nothing to assert, so these skip rather than pretend.
+    """
 
     def test_the_workspace_is_refused(self):
         with self.assertRaises(SystemExit):
@@ -66,8 +79,14 @@ class TestRefusalsComeBeforeAnyNetworkCall(unittest.TestCase):
             sf.check_destination(Path(r"E:\DaShaoHuo\samples"))
 
     def test_a_git_repository_is_refused(self):
-        """A sample in a repository gets committed eventually."""
-        tmp = tmpdir()
+        """A sample in a repository gets committed eventually.
+
+        The repository is built **at an allowed root**, because the refusal that fires first is
+        whichever one the path violates first -- and on a host where everything is under a refused
+        root, this assertion would be measuring that instead of the repository rule.
+        """
+        root = require_root()
+        tmp = Path(__import__("tempfile").mkdtemp(prefix="git-", dir=str(root)))
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
         (tmp / ".git").mkdir()
         with self.assertRaises(SystemExit) as ctx:
@@ -75,7 +94,7 @@ class TestRefusalsComeBeforeAnyNetworkCall(unittest.TestCase):
         self.assertIn("repository", str(ctx.exception))
 
     def test_a_quarantine_directory_is_allowed(self):
-        tmp = tmpdir()
+        tmp = tmpdir()          # skips, with a reason, if this host has no allowed location
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
         sf.check_destination(tmp / "samples")            # must not raise
 
