@@ -618,12 +618,17 @@ std basic_string vector allocator iterator char_traits ostream istream
 MSF_MAGIC = b"Microsoft C/C++ MSF 7.00\r\n\x1aDS\x00\x00\x00"
 
 
-def parse_debug_directory(data: bytes, pe: dict) -> dict | None:
+def parse_debug_directory(read, pe: dict) -> dict | None:
     """The CodeView record from the PE debug directory.
 
+    `read(offset, length)` supplies bytes, so this works equally from a buffer and from a file
+    seeked on demand. That matters: the debug directory sits near the *end* of both real samples
+    (95%), so a caller holding only a head peek cannot reach it, and quietly returning "none"
+    there would be a false negative on the most useful thing in the file.
+
     Returns the .pdb path recorded at build time, with the GUID and age that identify *which* .pdb
-    it was. Those two values are what make it possible to say whether a .pdb found beside the
-    binary is the one it was built with, rather than one that merely shares a name.
+    it was. Those two values make it possible to say whether a .pdb found beside the binary is the
+    one it was built with, rather than one that merely shares a name.
     """
     ddir = (pe.get("directories") or {}).get("debug")
     if not ddir:
@@ -634,14 +639,15 @@ def parse_debug_directory(data: bytes, pe: dict) -> dict | None:
     entries, pdb = [], None
     for i in range(min(ddir["size"] // 28, 64)):
         base = file_off + i * 28
-        if base + 28 > len(data):
+        raw = read(base, 28)
+        if len(raw) < 28:
             break
         (characteristics, timestamp, major, minor, dtype,
-         size_of_data, _addr, pointer) = struct.unpack_from("<IIHHIIII", data, base)
+         size_of_data, _addr, pointer) = struct.unpack("<IIHHIIII", raw)
         entry = {"type": dtype, "size": size_of_data, "timestamp": timestamp}
         # type 2 is IMAGE_DEBUG_TYPE_CODEVIEW; the payload is at `pointer`, a file offset.
-        if dtype == 2 and pointer and pointer + size_of_data <= len(data):
-            rec = data[pointer:pointer + size_of_data]
+        if dtype == 2 and pointer and size_of_data:
+            rec = read(pointer, min(size_of_data, 4096))
             if rec[:4] == b"RSDS" and len(rec) >= 24:
                 guid = rec[4:20]
                 age, = struct.unpack_from("<I", rec, 20)
@@ -649,8 +655,8 @@ def parse_debug_directory(data: bytes, pe: dict) -> dict | None:
                 entry["codeview"] = {
                     "format": "RSDS",
                     "guid": "%s-%s-%s-%s-%s" % (guid[0:4].hex(), guid[4:6].hex(),
-                                             guid[6:8].hex(), guid[8:10].hex(),
-                                             guid[10:16].hex()),
+                                                guid[6:8].hex(), guid[8:10].hex(),
+                                                guid[10:16].hex()),
                     "age": age,
                     "pdb_path": path,
                     "pdb_name": path.replace("/", "\\").rsplit("\\", 1)[-1] if path else "",
@@ -857,17 +863,56 @@ def find_sibling_pdb(target) -> Path | None:
     return None
 
 
-def analyse_debug_info(data: bytes, pe: dict | None, target) -> dict:
+def analyse_debug_info(data_or_path, pe: dict | None = None, target=None) -> dict:
     """Everything recoverable about how this binary was built.
 
-    Reads the PE's debug directory, then a .pdb beside it, and says whether the two belong
-    together. A .pdb whose GUID does not match the binary's CodeView record is **not its PDB**,
-    and reporting names out of it as though it were would be a quiet lie -- so the match is
-    recorded, and `None` means it could not be established rather than that it failed.
+    Reads the PE debug directory, then a .pdb beside it, and says whether the two belong together.
+    A .pdb whose GUID does not match the binary's CodeView record is **not its PDB**, and reporting
+    names out of it as though it were would be a quiet lie -- so the match is recorded, and `None`
+    means it could not be established rather than that it failed.
+
+    Call it with a path. That form seeks instead of loading, because the debug directory of both
+    real samples sat at **95% of the file** -- past any head peek a caller might reasonably have
+    taken -- and a truncated head would have produced a silent "no debug information" rather than
+    an error. The bytes form is kept for a caller that already has the whole file.
     """
+    if target is None and not isinstance(data_or_path, (bytes, bytearray)):
+        target = data_or_path
+    t = Path(target) if target is not None else None
+
+    if isinstance(data_or_path, (bytes, bytearray)):
+        if pe is None:
+            return {"available": False, "reason": "no PE to read a debug directory from"}
+        full = bytes(data_or_path)
+        size = len(full)
+        read = lambda off, n: full[off:off + n]        # noqa: E731
+        complete = True
+    else:
+        if t is None or not t.is_file():
+            return {"available": False, "reason": "not a file"}
+        try:
+            size = t.stat().st_size
+        except OSError as exc:
+            return {"available": False, "reason": str(exc)}
+        if pe is None:
+            # Only the headers are needed to learn where the directory is.
+            with open(t, "rb") as fh:
+                pe = parse_pe(fh.read(min(size, 1 << 20)))
+            if pe is None:
+                return {"available": False, "reason": "not a PE"}
+        complete = True
+
+        def read(off, n):
+            if off is None or off < 0 or off >= size:
+                return b""
+            with open(t, "rb") as fh:
+                fh.seek(off)
+                return fh.read(min(n, size - off))
+
     if pe is None:
         return {"available": False}
-    dbg = parse_debug_directory(data, pe)
+
+    dbg = parse_debug_directory(read, pe)
     if dbg is None:
         return {"available": False}
 
@@ -882,9 +927,10 @@ def analyse_debug_info(data: bytes, pe: dict | None, target) -> dict:
         path = cv.get("pdb_path") or ""
         if path:
             out["build_pdb_path"] = path
-            out["build_machine_dirs"] = [p for p in path.replace("/", "\\").split("\\")[:-1] if p][:12]
+            out["build_machine_dirs"] = [p for p in path.replace("/", "\\").split("\\")[:-1]
+                                         if p][:12]
 
-    sibling = find_sibling_pdb(target)
+    sibling = find_sibling_pdb(t) if t is not None else None
     if sibling is None:
         out["sibling_pdb"] = None
         return out
@@ -1296,6 +1342,21 @@ def find_inner_executables(root: Path, limit: int = 40) -> list:
             "entropy_max": max((s["entropy"] for s in (pe["sections"] if pe else [])), default=0.0),
             "truncated_head": size > PEEK_BYTES,
         })
+        # The inner files are the point of unpacking -- the wrapper was only the envelope -- so
+        # each one gets the same debug treatment as a top-level sample. Driven from the path, not
+        # the head: the debug directory of both real samples sat at 95% of the file, well past
+        # PEEK_BYTES, so a head-based read would have reported "no debug information" for files
+        # that carry it. That is the false negative this must not produce.
+        if pe:
+            info = analyse_debug_info(p, pe)
+            if info.get("available"):
+                out[-1]["debug_info"] = {
+                    "codeview_pdb_name": (info.get("codeview") or {}).get("pdb_name"),
+                    "build_pdb_path": info.get("build_pdb_path"),
+                    "build_machine_dirs": info.get("build_machine_dirs"),
+                    "sibling_pdb": (info.get("sibling_pdb") or {}).get("format"),
+                    "pdb_matches_binary": info.get("pdb_matches_binary"),
+                }
         if len(out) >= limit:
             break
     return out
@@ -1959,7 +2020,9 @@ def build_report(path: Path, out_dir: Path | None, *, max_bytes: int = DEFAULT_M
         # path on the build machine, and therefore the project and source layout, without the
         # .pdb being present. A .pdb that shipped beside it is reported separately and matched,
         # because a PDB that is not this binary's PDB must not have its names attributed to it.
-        "debug_info": analyse_debug_info(data, pe, path),
+        # Passed a path, not the bytes: the debug directory sits at ~95% of the file, so a
+        # caller holding a head peek would silently see nothing. This seeks instead.
+        "debug_info": analyse_debug_info(path, pe),
         "embedded_executables": embedded,
         "destructive": destructive,
         "iocs": iocs,

@@ -536,6 +536,58 @@ class TestItReachesTheReport(unittest.TestCase):
 
 
 
+class TestTheDebugDirectoryIsReachable(unittest.TestCase):
+    """A head peek cannot see it, and must not be mistaken for absence.
+
+    Measured on both real samples: the debug directory sits at **95% of the file**, because the
+    sections carrying it are linked late. The inner-file scan reads only the first 4 MB, so a
+    reader driven by that head would have answered "no debug information" -- not an error, a
+    silent false negative, on the most informative thing in the directory.
+    """
+
+    def setUp(self):
+        self.sample = Path(r"D:\PWSBHv1.5.0\PowerfulWindSlickedBackHair.exe")
+        if not self.sample.is_file():
+            self.skipTest("the real sample is not present on this machine")
+
+    def test_a_head_peek_misses_it(self):
+        """Not a defect to fix -- a limitation to be aware of, and the reason the reader seeks."""
+        with open(self.sample, "rb") as fh:
+            head = fh.read(tk.PEEK_BYTES)
+        got = tk.analyse_debug_info(head, tk.parse_pe(head), self.sample)
+        self.assertFalse(got.get("available"),
+                         "if this ever passes, the head is large enough and the seek is merely "
+                         "an optimisation rather than a correctness requirement")
+
+    def test_a_seek_finds_it(self):
+        got = tk.analyse_debug_info(self.sample, tk.parse_pe(self.sample.read_bytes()))
+        self.assertTrue(got["available"])
+        self.assertIn("obj", got["build_pdb_path"].lower())
+
+    def test_the_two_answers_differ_on_the_same_file(self):
+        """The whole point, stated as one assertion."""
+        with open(self.sample, "rb") as fh:
+            head = fh.read(tk.PEEK_BYTES)
+        from_head = tk.analyse_debug_info(head, tk.parse_pe(head), self.sample).get("available")
+        from_seek = tk.analyse_debug_info(self.sample,
+                                          tk.parse_pe(self.sample.read_bytes())).get("available")
+        self.assertNotEqual(from_head, from_seek,
+                            "the head and the seek must not agree here: that is the bug")
+        self.assertFalse(from_head)
+        self.assertTrue(from_seek)
+
+    def test_the_debug_directory_really_is_late_in_the_file(self):
+        """Keeps the reason for the seek honest: if a future sample has it early, this test says
+        so rather than letting the seek look like an arbitrary preference."""
+        data = self.sample.read_bytes()
+        pe = tk.parse_pe(data)
+        dd = (pe.get("directories") or {}).get("debug")
+        self.assertIsNotNone(dd)
+        off = tk.rva_to_offset(pe, dd["rva"])
+        self.assertGreater(off / len(data), 0.5,
+                           "the debug directory is not late in this file after all")
+
+
 if __name__ == "__main__":
 
     unittest.main(verbosity=2)
