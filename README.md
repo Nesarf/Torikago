@@ -97,7 +97,18 @@ python torikago.py suspicious.exe -o ./out        # also writes report.json and 
 python torikago.py suspicious.exe --json          # machine-readable on stdout
 python torikago.py suspicious.exe --unpack        # actually unpack it, then triage the inside
 python torikago.py --scan ./downloads             # which of these files deserves my time?
+
+python torikago.py suspicious.exe --handoff defender   # ask a real engine, report ITS verdict
+python torikago.py --posture                      # what is protecting this machine, read-only
+
+python torikago.py --scan ./downloads --scan-only exe,dll --scan-limit 500
+python torikago.py --corpus-write ./downloads --corpus-file corpus/manifest.jsonl
+python torikago.py --corpus-check corpus/manifest.jsonl
 ```
+
+Every flag above is listed on purpose. Three of them shipped for several versions with no mention
+here, which meant somebody could install the tool and never learn the feature existed — the README is
+the front door and a feature behind it needs a sign.
 
 Example summary:
 
@@ -153,6 +164,62 @@ The MISP event is written as `published=false` on purpose: whether your indicato
 shared intelligence is a decision about your own data, not one a triage tool should make
 for you.
 
+## What is protecting this machine
+
+```bash
+python torikago.py --posture        # read-only; --json for scripts
+```
+
+A static audit of the endpoint protection itself, **entirely read-only**: it queries, it never sets.
+No `Set-MpPreference`, no exclusion added, no service touched — asserted by a test, because a report
+that can modify what it reports on is not a report.
+
+It answers the questions that change what every other result means:
+
+* **Is Defender's engine watching, and is it the one doing the watching?** A third-party product can
+  hold the Security Center registration while Defender's engine still answers scans — observed on the
+  machine this was written on, where **Tencent PC Manager is registered alongside Defender**, so a
+  clean "Defender found nothing" is weaker than it sounds.
+* **What is excluded from scanning.** An exclusion is *silent, permanent* protection loss that
+  outlives the reason for it.
+* **What the machine has actually caught**, newest first.
+
+### Declared vs observed
+
+The registration is **self-declared and nothing verifies it**. A product registers, states that it is
+enabled and protecting in real time, and **Windows turns Defender off in response** — documented
+behaviour, and how any third-party antivirus takes over. Two public tools abuse exactly that:
+`no-defender` registered a fake that protected nothing, and `Defendnot` injected its fake DLL into
+`Taskmgr.exe` — a signed process the system already trusts — to get past the checks.
+
+So `--posture` looks for **a product whose own declaration is contradicted by an observable fact**: an
+executable that is missing while real-time protection is claimed, or one pointing at a signed
+non-security component, **which is what injection looks like from the outside**.
+
+**Finding a contradiction means something. Finding none means nothing** — a convincing fake declares a
+plausible signed path that exists and runs and passes every check. That sentence is in the output, not
+only here.
+
+### The boundary travels with the result
+
+Four lines, attached to **every** return path including the error paths:
+
+```
+This tool performs a static audit only: it reads configuration and state, never launches a
+scanner, never changes a setting, and never touches the network.
+It does NOT address: whether protection actually detects anything. Real-time interception,
+behavioural blocking and kernel-level defence are not observable from here, and a product
+reporting itself active is not evidence that it is effective.
+It reports [registration, state flags, exclusions, and detection history]. It is NOT an
+antivirus, a firewall, or a replacement for either.
+A clean audit is NOT proof of safety. Treating it as one is a misuse. In particular, an empty
+exclusion list does not mean nothing is excluded, and a product listed as enabled does not
+mean it is watching.
+```
+
+Error paths included, deliberately: a failed query returning an empty list looks a great deal like
+"nothing found", and that is exactly when the notice matters most.
+
 ## Signals are graded, and the grading is the point
 
 An import is not a verdict. `IsDebuggerPresent` is how CPython implements `sys.gettrace`;
@@ -181,8 +248,19 @@ trojan carrying the injection triad and a misnamed extension. Both directions ar
 python -m unittest discover -s test -v
 ```
 
-69 tests, no samples required: every fixture is a small synthetic file, including a
-hand-assembled PE. A suite that needs real malware is a suite that stops being run.
+245 tests, no samples required for the suite itself: every fixture is a small synthetic file,
+including a hand-assembled PE. A suite that needs real malware is a suite that stops being run.
+
+Two of them exist because CI caught what the development machine could not, and both are in the
+same check: `pathlib.Path` follows the host, so on Linux the name of a Windows path is the entire
+string — a backslash is not a separator there — and a check keyed on the file name could never fire.
+It worked perfectly on Windows, which is exactly why it shipped.
+
+(That paragraph originally spelled the path out, and writing it through a shell heredoc turned the
+two characters before `askmgr` into a real tab — the fifth time that has happened in this project. It
+is described rather than quoted now, because a sentence that cannot survive being written down is
+not documentation.)
+
 
 The PE parser is additionally validated against real binaries, which is the baseline that
 says the fixtures are not just self-consistent: `kernel32.dll` → 104 DLLs / 1274
