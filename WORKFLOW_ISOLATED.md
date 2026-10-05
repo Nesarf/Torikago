@@ -122,9 +122,35 @@ that does not exist on Home.
 any usable virtual machine**, and running a guest beside this workload slows both sides. So the order
 is: install, then **free memory**, then create the VM — not install-and-try.
 
-**The guest needs a Windows image**, and it has to be a *clean* one. That is a 5–20 GB download and the
-one part of this that cannot be avoided: **a virtual machine is only as clean as the image it was
-installed from.** Place the VM's disk on `E:` (89 GB free) — **not `F:` (17 GB)**, and never `C:`.
+**The guest needs a Windows image**, and it has to be a *clean* one: **a virtual machine is only as
+clean as the image it was installed from.** Place the VM's disk on `E:` (89 GB free) — **not `F:`
+(17 GB)**, and never `C:`.
+
+### The image: an official Microsoft evaluation, not a "lite" build
+
+**The tempting shortcut is a debloated third-party ISO, and it is exactly the wrong instinct here.**
+A trimmed image is *somebody else's operating system*, arrived at by removing components — and the
+whole point of this virtual machine is that nothing in it is unknown. Microsoft publishes LTSC
+evaluation ISOs itself, which gives the lean build **and** a traceable origin:
+
+| | Windows 10 Enterprise LTSC 2021 | Windows 11 IoT Enterprise LTSC 2024 |
+|---|---|---|
+| ISO name | `19044.1288.211006-0501…CLIENT_LTSC_EVAL_x64FRE_en-us` | — |
+| size | 4.56 GB (4,898,582,528 bytes, **verified**) | ~5.5 GB |
+| link | **verified working**, resolves to `software-download.microsoft.com` | must be clicked by hand — the Evaluation Center **returns 403 to automated requests** |
+| RAM floor | **2 GB** | 4 GB, ~6 GB to be comfortable |
+| also needs | — | TPM 2.0 and Secure Boot (bypassable, but more moving parts) |
+| support until | 2027-01-12 | ~2034 |
+| activation | **90-day evaluation, no key** | 90-day evaluation |
+
+**Windows 10 LTSC 2021 is the recommendation, and memory is why.** On a host with 15.9 GB total, a
+guest wanting 6 GB competes with the work being done to analyse the samples. **For reading PE files
+there is no meaningful difference between the two**: the format did not change, and neither `nanodesu`
+nor `torikago` depends on the guest's version.
+
+**The 90-day evaluation is not the limitation it sounds like.** Take a snapshot immediately after
+installation; when the evaluation expires, revert — **the clock resets with the snapshot**, and
+discard-and-revert is how this machine was always meant to be used.
 
 **What is not an option, however convenient:** unsealing on the host and being careful. Care is not a
 containment mechanism, and the failure mode is a single double-click.
