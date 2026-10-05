@@ -91,6 +91,55 @@ class TestWhatIsNotAContradiction(unittest.TestCase):
         self.assertIn("no executable declared", found["checks"])
 
 
+class TestPathParsingIsPlatformIndependent(unittest.TestCase):
+    """The bug CI found and Windows could not.
+
+    `pathlib.Path` follows the host, so on Linux `Path(r"C:\Windows\System32\taskmgr.exe").name`
+    is the *entire string* -- a backslash is not a separator there. The registration always holds a
+    Windows path, so parsing it with the host's rules made the name check unreachable on every
+    platform except the one it was developed on.
+    """
+
+    # Built from chr(92) rather than a literal: this file has been mangled twice by a shell heredoc
+    # eating backslashes, once turning 	 inside "taskmgr" into a real tab. A test fixture that
+    # cannot survive being written is not a fixture.
+    _BS = chr(92)
+
+    def _win(self, *parts):
+        return "C:" + self._BS + (self._BS.join(parts))
+
+    def test_the_name_is_read_with_windows_rules(self):
+        from pathlib import PureWindowsPath
+        exe = self._win("Windows", "System32", "taskmgr.exe")
+        self.assertEqual(PureWindowsPath(exe).name, "taskmgr.exe")
+        import os
+        if os.name != "nt":
+            self.assertNotEqual(Path(exe).name, "taskmgr.exe",
+                                "the host parser agreed with the Windows parser, so this test can "
+                                "no longer distinguish them")
+
+    def test_a_windows_path_is_recognised_on_any_platform(self):
+        """The check has to fire identically whether this runs on Windows, Linux or macOS."""
+        found = pr.check_declaration({
+            "name": "Totally Real Antivirus",
+            "declared_executable": self._win("Windows", "System32", "taskmgr.exe"),
+            "declares_realtime": True,
+        })
+        self.assertIn("taskmgr.exe", found["contradictions"][0],
+                      "the trusted-component check did not fire, which on a non-Windows host means "
+                      "the path was parsed with the wrong rules")
+
+    def test_the_vendor_directory_is_read_with_windows_rules(self):
+        services = [{"name": "QQPCMgr",
+                     "path": self._win("Tencent", "QQPCMgr", "QQPCMgr.exe")}]
+        result = pr.matching_service(
+            {"name": "X",
+             "declared_executable": self._win("Tencent", "QQPCMgr", "17.0", "QQPCMgr.exe")},
+            services)
+        self.assertEqual(result["matched"], "QQPCMgr",
+                         "the vendor directory was not extracted, so no service could match")
+
+
 class TestServiceMatchingDoesNotCryWolf(unittest.TestCase):
     """The first version matched "Windows Defender" against a service called Appinfo, because both
     contain "windows". That is a false positive produced by the matcher, not by the machine."""

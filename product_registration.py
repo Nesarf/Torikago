@@ -38,7 +38,7 @@ layer to name what it does not cover. Adapted, not copied.
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # Binaries that are Microsoft-signed, trusted, and are *not* security products. A protection product
 # declaring one of these as its executable is the signature of an injected fake: this is the list the
@@ -153,6 +153,12 @@ def check_declaration(product: dict) -> dict:
         out["checks"].append("declared executable is a URI, not a path: not checkable as a file")
         return out
 
+    # Parsed as a Windows path *regardless of the platform running this*, because the registration
+    # always holds a Windows path. `pathlib.Path` follows the host: on Linux,
+    # `Path(r"C:\Windows\System32\taskmgr.exe").name` is the whole string, because a backslash is
+    # not a separator there -- so the name check could never match and CI caught it while Windows
+    # could not. The bug only existed on the platform that is not the target.
+    win = PureWindowsPath(exe)
     path = Path(exe)
     # The name check comes FIRST and does not depend on the file existing.
     #
@@ -160,11 +166,11 @@ def check_declaration(product: dict) -> dict:
     # there, so the existence branch returned early and the Defendnot shape was never reached. The
     # defect was in the check, not only in the test -- an injected fake must point at a trusted
     # component, and that is visible in the *name* whatever the platform thinks of the path.
-    if path.name.lower() in TRUSTED_BUT_NOT_SECURITY:
+    if win.name.lower() in TRUSTED_BUT_NOT_SECURITY:
         out["contradictions"].append(
             "declares itself the protection product while pointing at %s, a signed Microsoft "
             "component that is not security software -- which is what an injected fake would "
-            "produce, because it must point at something the system already trusts" % path.name)
+            "produce, because it must point at something the system already trusts" % win.name)
 
     if not path.is_file():
         out["checks"].append("declared executable does not exist")
@@ -209,16 +215,29 @@ def matching_service(product: dict, services: list) -> dict:
     exe = (product.get("declared_executable") or "")
     tokens = set()
     if exe and "://" not in exe:
-        parts = Path(exe).parts
-        # The vendor directory, and only that. An earlier version also matched words from the
-        # display name, which matched "Windows Defender" against a service called Appinfo because
-        # both contain "windows" -- a false positive produced by the matcher, not by the machine.
-        if len(parts) >= 2:
-            tokens.add(parts[-2].lower())
-    generic = {"windows", "system", "program", "files", "common", "microsoft",
-               "programs", "x86", "defender", "security", "antivirus", "protection"}
+        # The vendor directory, found by walking UP from the executable rather than taking the
+        # immediate parent. The immediate parent is a version folder in the common layout
+        # (`...\Tencent\QQPCMgr.11.28973.206\QQPCMgr.exe`), which is why the first version of
+        # this could not match a real product -- caught by a test, not by the machine.
+        parts = list(PureWindowsPath(exe).parts[1:-1])       # drop the drive and the file name
+        generic = {"program files", "program files (x86)", "programdata", "windows", "system32",
+                   "syswow64", "appdata", "local", "roaming", "common files", "bin", "x64", "x86"}
+        for part in reversed(parts):
+            low = part.lower()
+            if low in generic:
+                continue
+            # A version-looking component is not a vendor name, so it is skipped rather than
+            # returned: "17.0" would never match a service path.
+            if part and (part[0].isdigit() or all(c in "0123456789._-" for c in part)):
+                continue
+            tokens.add(low)
+            break
+        if parts:
+            tokens.add(parts[0].lower())                     # the top-level vendor directory
+    generic_words = {"windows", "system", "program", "files", "common", "microsoft",
+                     "programs", "x86", "defender", "security", "antivirus", "protection"}
     for word in (product.get("name") or "").replace("(", " ").replace(")", " ").split():
-        if len(word) >= 6 and word.lower() not in generic:
+        if len(word) >= 6 and word.lower() not in generic_words:
             tokens.add(word.lower())
     if not tokens:
         return {"matched": None, "reason": "nothing distinctive to match on"}

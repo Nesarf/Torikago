@@ -35,6 +35,18 @@ only in the docs — the same rule the rest of this project follows.
 
 ## Four things this got wrong first, all kept in the code
 
+**The path was parsed with the host's rules, not Windows'.** CI is a Linux runner, where
+`pathlib.Path(r"C:\Windows\System32	askmgr.exe").name` is **the entire string** — a backslash is
+not a separator there. So the trusted-component check could never fire, and **it worked perfectly on
+Windows, which is precisely why it shipped**. Registration always holds a Windows path, so parsing
+now uses `PureWindowsPath` regardless of platform. This is the second bug CI found and the development
+machine could not.
+
+**The vendor directory was the immediate parent.** In the common layout
+(`…\Tencent\QQPCMgr.11.28973.206\QQPCMgr.exe`) that is the *version* folder, so no service could
+ever match. It now walks up to the first non-version, non-generic component — caught by a test, not by
+the machine.
+
 **The name check depended on the file existing.** `C:\Windows\System32	askmgr.exe` is not a file
 on a Linux runner, so the existence branch returned early and **the Defendnot shape was never
 reached** — CI failed on the assertion and was right to. The defect was in the check rather than only
