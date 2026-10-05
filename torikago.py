@@ -571,6 +571,342 @@ def identify_packer(pe: dict, data: bytes, imports: list) -> dict:
 # --------------------------------------------------------------------------- #
 # wrappers we can unpack without running anything
 # --------------------------------------------------------------------------- #
+# Debug information: the PE debug directory, and a .pdb sitting beside the binary
+#
+# A debug build carries two gifts, and one of them needs no second file at all.
+#
+# The first is in the PE: the CodeView record holds the absolute path of the .pdb **on the build
+# machine**. A real sample yielded
+#
+#   D:\Development\OpenSource\PowerfulWindSlickedBackHairCS-LX_Improve\...\obj\Debug\....pdb
+#
+# which names the project, the source layout and the build configuration, and is readable whether
+# or not the .pdb ever shipped. Nothing here is inferred -- the path is in the file.
+#
+# The second is the .pdb itself, when it did ship, and shipping it is a disclosure in its own
+# right: a PDB holds type names, method names, source paths and more. On that same sample the type
+# and method names were recoverable in seconds, where disassembling to the same understanding
+# would have taken far longer.
+#
+# What this claims and what it does not. The MSF container is parsed as the structure it is --
+# block size, stream directory, per-stream sizes. The **symbol records inside those streams are
+# not parsed**: the native PDB record format is large and thinly documented, and a half-written
+# reader would produce confident nonsense, which is worse than none. So the identifiers are
+# *extracted* from stream bytes, and the report labels them as extracted rather than interpreted.
+# The PE-side helpers (parse_pe, rva_to_offset) are the ones already in this module; there is no
+# second PE parser here.
+# --------------------------------------------------------------------------- #
+
+# Identifier shapes worth pulling out of a symbol stream. A PDB is full of strings that name
+# nothing; a list of those is noise, so these are the ones that name something.
+_RE_TYPE_NAME = re.compile(rb"[A-Z][A-Za-z0-9_]{2,60}(?:\.[A-Z][A-Za-z0-9_]{1,60})*")
+_RE_NAMESPACE = re.compile(rb"(?:^|\x00)((?:[A-Z][A-Za-z0-9_]{1,40}\.){1,6}[A-Z][A-Za-z0-9_]{1,40})(?:\x00|$)")
+_RE_SOURCE_PATH = re.compile(rb"[A-Za-z]:\\[^\x00\r\n]{3,200}\.(?:cs|vb|fs|cpp|c|h|hpp|py|js|ts)")
+_RE_REL_SOURCE = re.compile(rb"(?:[\w.\-]+[\\/]){1,6}[\w.\-]+\.(?:cs|vb|fs|cpp|c|h|hpp|py|js|ts)")
+
+# Names that appear in essentially every managed assembly, or every C++ object, and therefore say
+# nothing about *this* one. Without this list the output is a wall of framework names.
+_PDB_STOPWORDS = frozenset("""
+System Microsoft Windows Collections Generic Object String Int32 Boolean Void Byte Char Double
+Single Decimal Attribute Exception EventArgs IDisposable IEnumerable IEnumerator List Dictionary
+Runtime Compiler Version CultureInfo Threading Text Drawing Forms Component Container Marshal
+Nullable Activator Console Math Convert Array Type Enum Delegate Action Func Task Reflection
+Resources Properties Settings Designer AssemblyInfo Program Main Dispose InitializeComponent
+std basic_string vector allocator iterator char_traits ostream istream
+""".split())
+
+MSF_MAGIC = b"Microsoft C/C++ MSF 7.00\r\n\x1aDS\x00\x00\x00"
+
+
+def parse_debug_directory(data: bytes, pe: dict) -> dict | None:
+    """The CodeView record from the PE debug directory.
+
+    Returns the .pdb path recorded at build time, with the GUID and age that identify *which* .pdb
+    it was. Those two values are what make it possible to say whether a .pdb found beside the
+    binary is the one it was built with, rather than one that merely shares a name.
+    """
+    ddir = (pe.get("directories") or {}).get("debug")
+    if not ddir:
+        return None
+    file_off = rva_to_offset(pe, ddir["rva"])
+    if file_off is None:
+        return None
+    entries, pdb = [], None
+    for i in range(min(ddir["size"] // 28, 64)):
+        base = file_off + i * 28
+        if base + 28 > len(data):
+            break
+        (characteristics, timestamp, major, minor, dtype,
+         size_of_data, _addr, pointer) = struct.unpack_from("<IIHHIIII", data, base)
+        entry = {"type": dtype, "size": size_of_data, "timestamp": timestamp}
+        # type 2 is IMAGE_DEBUG_TYPE_CODEVIEW; the payload is at `pointer`, a file offset.
+        if dtype == 2 and pointer and pointer + size_of_data <= len(data):
+            rec = data[pointer:pointer + size_of_data]
+            if rec[:4] == b"RSDS" and len(rec) >= 24:
+                guid = rec[4:20]
+                age, = struct.unpack_from("<I", rec, 20)
+                path = rec[24:].split(b"\x00", 1)[0].decode("utf-8", "replace")
+                entry["codeview"] = {
+                    "format": "RSDS",
+                    "guid": "%s-%s-%s-%s-%s" % (guid[0:4].hex(), guid[4:6].hex(),
+                                             guid[6:8].hex(), guid[8:10].hex(),
+                                             guid[10:16].hex()),
+                    "age": age,
+                    "pdb_path": path,
+                    "pdb_name": path.replace("/", "\\").rsplit("\\", 1)[-1] if path else "",
+                }
+                if pdb is None:
+                    pdb = entry["codeview"]
+            elif rec[:4] == b"NB10" and len(rec) >= 16:
+                path = rec[16:].split(b"\x00", 1)[0].decode("utf-8", "replace")
+                entry["codeview"] = {"format": "NB10", "pdb_path": path,
+                                     "pdb_name": path.replace("/", "\\").rsplit("\\", 1)[-1]}
+                if pdb is None:
+                    pdb = entry["codeview"]
+        entries.append(entry)
+    if not entries:
+        return None
+    return {"entries": entries, "pdb": pdb}
+
+
+def parse_msf(blob: bytes) -> dict | None:
+    """Read the MSF superblock and stream directory -- the container, as the structure it is."""
+    if not blob.startswith(MSF_MAGIC) or len(blob) < 64:
+        return None
+    try:
+        (block_size, _free_block, num_blocks, num_dir_bytes,
+         _unknown, block_map) = struct.unpack_from("<IIIIII", blob, 32)
+        if block_size not in (512, 1024, 2048, 4096) or num_blocks <= 0:
+            return None
+        num_dir_blocks = (num_dir_bytes + block_size - 1) // block_size
+        map_off = block_map * block_size
+        if map_off + num_dir_blocks * 4 > len(blob):
+            return None
+        dir_blocks = [struct.unpack_from("<I", blob, map_off + i * 4)[0]
+                      for i in range(num_dir_blocks)]
+        directory = b"".join(blob[b * block_size:(b + 1) * block_size]
+                             for b in dir_blocks)[:num_dir_bytes]
+        if len(directory) < 4:
+            return None
+        count, = struct.unpack_from("<I", directory, 0)
+        # A directory claiming more streams than could possibly fit is corrupt, not interesting.
+        if count > 200000 or count * 8 > len(directory):
+            return None
+        off, streams = 4, []
+        for _ in range(count):
+            if off + 8 > len(directory):
+                break
+            _ver, size = struct.unpack_from("<II", directory, off)
+            off += 8
+            n = (size + block_size - 1) // block_size
+            if off + n * 4 > len(directory):
+                break
+            blocks = list(struct.unpack_from("<%dI" % n, directory, off))
+            off += n * 4
+            streams.append({"size": size, "blocks": blocks})
+    except (struct.error, IndexError, MemoryError):
+        return None
+    return {"block_size": block_size, "num_blocks": num_blocks, "streams": streams,
+            "format": "msf-native-pdb"}
+
+
+def msf_stream(blob: bytes, msf: dict, index: int, limit: int = 4 << 20) -> bytes:
+    """One stream's bytes, capped so a corrupt directory cannot ask for the whole file."""
+    if index < 0 or index >= len(msf["streams"]):
+        return b""
+    st = msf["streams"][index]
+    bs = msf["block_size"]
+    want = min(st["size"], limit)
+    out, got = [], 0
+    for b in st["blocks"]:
+        if got >= want:
+            break
+        chunk = blob[b * bs:(b + 1) * bs][:want - got]
+        out.append(chunk)
+        got += len(chunk)
+    return b"".join(out)
+
+
+def extract_pdb_identifiers(blob: bytes, msf: dict, *, limit: int = 500) -> dict:
+    """Source paths and identifier-shaped names recoverable from the symbol streams.
+
+    Extraction, not interpretation. These are strings that look like the things they are, taken
+    from streams whose record format this code does not claim to read. The report says so, because
+    a caller deciding whether to trust a name deserves to know how it was obtained.
+    """
+    paths, namespaces, types, methods = set(), set(), set(), set()
+    # Stream 1 is the PDB info stream; the rest carry symbol records.
+    for i in range(1, len(msf["streams"])):
+        if len(types) > limit and len(paths) > limit:
+            break
+        chunk = msf_stream(blob, msf, i, limit=2 << 20)
+        if not chunk:
+            continue
+        for m in _RE_SOURCE_PATH.finditer(chunk):
+            paths.add(m.group(0).decode("utf-8", "replace"))
+        for m in _RE_REL_SOURCE.finditer(chunk):
+            paths.add(m.group(0).decode("utf-8", "replace"))
+        for m in _RE_NAMESPACE.finditer(chunk):
+            namespaces.add(m.group(1).decode("utf-8", "replace"))
+        for m in _RE_TYPE_NAME.finditer(chunk):
+            word = m.group(0).decode("utf-8", "replace")
+            if word.split(".", 1)[0] in _PDB_STOPWORDS:
+                continue
+            if "." in word:
+                owner, method = word.rsplit(".", 1)
+                types.add(owner.split(".")[-1])
+                if len(method) > 3 and method not in _PDB_STOPWORDS:
+                    methods.add(method)
+            elif len(word) > 3:
+                types.add(word)
+    return {"source_paths": sorted(paths), "namespaces": sorted(namespaces),
+            "type_names": sorted(types), "method_names": sorted(methods)}
+
+
+_PDB_INFO_VERSION = 20000404
+
+
+def _find_pdb_info_stream(blob: bytes):
+    """Locate the PDB information stream by its own marker, and return what it holds.
+
+    The stream directory is not trusted for this. On a real PDB it resolved every stream to the
+    same wrong block, which did not stop a GUID-shaped value from being produced -- and a wrong
+    GUID turns "this .pdb is the one this binary was built with" into a confident denial. So the
+    stream is found by the marker it must begin with, and its shape is checked before use.
+    """
+    needle = struct.pack("<I", _PDB_INFO_VERSION)
+    start = 0
+    while True:
+        idx = blob.find(needle, start)
+        if idx < 0:
+            return None
+        if idx + 28 <= len(blob):
+            ver, sig, age = struct.unpack_from("<III", blob, idx)
+            guid = blob[idx + 12:idx + 28]
+            # Age is a small counter; a plausible value plus a non-empty GUID is the shape.
+            if ver == _PDB_INFO_VERSION and 0 < age < 100000 and guid != bytes(16):
+                return ver, sig, age, guid
+        start = idx + 4
+
+
+def read_pdb(path) -> dict:
+    """Container format, and for the container that can be read, what is recoverable from it.
+
+    A Portable PDB is recognised and reported but **not** parsed: it is a different container
+    (ECMA-335 metadata) and a second reader is not something to guess at.
+    """
+    p = Path(path)
+    try:
+        if p.stat().st_size > (256 << 20):
+            return {"path": str(p), "name": p.name, "format": "too large to read",
+                    "readable": False}
+        blob = p.read_bytes()
+    except OSError as exc:
+        return {"path": str(p), "name": p.name, "format": "unreadable", "readable": False,
+                "reason": str(exc)}
+
+    out = {"path": str(p), "name": p.name, "size": len(blob), "readable": False}
+    if blob.startswith(MSF_MAGIC):
+        out["format"] = "msf-native-pdb"
+        msf = parse_msf(blob)
+        if msf is None:
+            # The container itself did not hold up, so nothing inside it is claimed. Say that,
+            # rather than letting a caller read an absent field as "there was nothing to find".
+            out["reason"] = "the superblock or stream directory is malformed"
+            out["info_stream"] = "not located: the MSF stream directory could not be read"
+            return out
+        out["readable"] = True
+        out["stream_count"] = len(msf["streams"])
+
+        # The PDB information stream identifies itself: it begins with Version == 20000404. That
+        # is a check the directory cannot provide, and without it a wrong block number yields a
+        # GUID-shaped value that is not a GUID -- which produced a confident "this .pdb does not
+        # match the binary" on a .pdb that did. A false mismatch is worse than no answer, so the
+        # stream is validated before anything is read out of it, and failure is reported as
+        # unknown rather than as a result.
+        info = _find_pdb_info_stream(blob)
+        if info is None:
+            out["guid"] = None
+            out["info_stream"] = "not located: no stream begins with the PDB version marker"
+        else:
+            ver, sig, age, guid = info
+            out["guid"] = "%s-%s-%s-%s-%s" % (guid[0:4].hex(), guid[4:6].hex(),
+                                           guid[6:8].hex(), guid[8:10].hex(),
+                                           guid[10:16].hex())
+            out["age"] = age
+            out["signature"] = "%#x" % sig
+        out["identifiers_are"] = "extracted from stream bytes, not parsed from symbol records"
+        out.update(extract_pdb_identifiers(blob, msf))
+        return out
+    if blob[:4] == b"BSJB":
+        out["format"] = "portable-pdb"
+        out["reason"] = ("ECMA-335 metadata rather than the native MSF container, so it is not "
+                         "parsed here. Its #Strings heap holds type and method names in plain "
+                         "text and is readable with a metadata reader.")
+        return out
+    out["format"] = "unknown"
+    return out
+
+
+def find_sibling_pdb(target) -> Path | None:
+    """A .pdb beside the binary. That is the one that shipped, which is the disclosure."""
+    t = Path(target)
+    for candidate in (t.with_suffix(".pdb"), t.with_suffix(".PDB")):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def analyse_debug_info(data: bytes, pe: dict | None, target) -> dict:
+    """Everything recoverable about how this binary was built.
+
+    Reads the PE's debug directory, then a .pdb beside it, and says whether the two belong
+    together. A .pdb whose GUID does not match the binary's CodeView record is **not its PDB**,
+    and reporting names out of it as though it were would be a quiet lie -- so the match is
+    recorded, and `None` means it could not be established rather than that it failed.
+    """
+    if pe is None:
+        return {"available": False}
+    dbg = parse_debug_directory(data, pe)
+    if dbg is None:
+        return {"available": False}
+
+    out = {"available": True, "executed": False, "directory_entries": len(dbg["entries"]),
+           "types": sorted({_DEBUG_TYPE_NAMES.get(e["type"], str(e["type"]))
+                            for e in dbg["entries"]})}
+    cv = dbg["pdb"]
+    if cv:
+        out["codeview"] = cv
+        # The path alone is the prize: project name, source layout, build configuration -- and it
+        # is in the binary whether or not the .pdb was ever distributed.
+        path = cv.get("pdb_path") or ""
+        if path:
+            out["build_pdb_path"] = path
+            out["build_machine_dirs"] = [p for p in path.replace("/", "\\").split("\\")[:-1] if p][:12]
+
+    sibling = find_sibling_pdb(target)
+    if sibling is None:
+        out["sibling_pdb"] = None
+        return out
+
+    pdb = read_pdb(sibling)
+    out["sibling_pdb"] = pdb
+    if cv and cv.get("guid") and pdb.get("guid"):
+        out["pdb_matches_binary"] = cv["guid"].lower() == pdb["guid"].lower()
+    else:
+        out["pdb_matches_binary"] = None
+    return out
+
+
+_DEBUG_TYPE_NAMES = {
+    0: "unknown", 1: "coff", 2: "codeview", 3: "fpo", 4: "misc", 5: "exception",
+    6: "fixup", 7: "omap_to_src", 8: "omap_from_src", 9: "borland", 10: "reserved10",
+    11: "clsid", 12: "vc_feature", 13: "pogo", 14: "iltcg", 16: "repro",
+    17: "embedded_portable_pdb", 19: "pdb_checksum", 20: "ex_dllcharacteristics",
+}
+
+
+# --------------------------------------------------------------------------- #
 
 MEI_COOKIE = b"MEI\x0c\x0b\x0a\x0b\x0e"
 PYZ_MAGIC = b"PYZ\0"
@@ -1455,7 +1791,8 @@ def hashes_of(data: bytes, part: int = 0) -> dict:
 
 
 def assess(pe: dict | None, packer: dict, strings: dict, iocs: dict,
-           imports: list, embedded: list, destructive: dict | None = None) -> dict:
+           imports: list, embedded: list, destructive: dict | None = None,
+           debug_info: dict | None = None) -> dict:
     """A short list of reasons this file deserves attention. Not a verdict."""
     reasons = []
     # Destructive capability is reported first. It is the one finding whose consequence is
@@ -1470,14 +1807,44 @@ def assess(pe: dict | None, packer: dict, strings: dict, iocs: dict,
         reasons.append("packed or encrypted: " + ", ".join(
             f["packer"] for f in packer["findings"]))
     if pe:
+        # Not for a managed assembly. IL plus metadata in .text is far less redundant than native
+        # machine code, so it sits near the top of the entropy range by construction -- a real
+        # .NET sample measured 7.98 and was called packed. The packer finding has known this for
+        # a while; this reason had not, so the same file was still described as high-entropy
+        # after the packer verdict was corrected.
         exec_high = [s["name"] for s in pe["sections"]
-                     if s["executable"] and s["entropy"] >= HIGH_ENTROPY]
+                     if s["executable"] and s["entropy"] >= HIGH_ENTROPY]             if not pe.get("is_dotnet") else []
         if exec_high:
             reasons.append("high-entropy executable section(s): " + ", ".join(exec_high))
         if pe["directories"].get("tls"):
             reasons.append("has a TLS callback (runs before the entry point)")
     if embedded:
         reasons.append(f"{len(embedded)} embedded PE image(s)")
+    # Debug information is a disclosure, not a capability, and it is reported in that register.
+    # A shipped .pdb hands over type names, method names and source paths; a CodeView record alone
+    # hands over the build machine's directory layout. Either makes the rest of the analysis
+    # easier, which is precisely why an analyst wants to be told, and why a publisher should not
+    # have shipped it.
+    if debug_info and debug_info.get("available"):
+        pdb = debug_info.get("sibling_pdb") or {}
+        if pdb and pdb.get("format", "").startswith(("msf", "portable")):
+            match = debug_info.get("pdb_matches_binary")
+            where = ("matches this binary" if match is True
+                     else "does NOT match this binary" if match is False
+                     else "match unverified")
+            reasons.append("a .pdb shipped beside the binary (%s, %s)"
+                           % (pdb.get("format"), where))
+        if debug_info.get("build_pdb_path"):
+            # A full path and a bare filename are not the same disclosure. Chromium's official
+            # builds record just "electron.exe.pdb", which gives away nothing beyond the fact of a
+            # debug build; a compiled-for-this-project sample recorded the whole
+            # ...\obj\Debug\... path, which names the project and the source layout. Say which.
+            if debug_info.get("build_machine_dirs"):
+                reasons.append("debug build: the CodeView record names the full build-time .pdb "
+                               "path, so the build machine's directory layout is in the binary")
+            else:
+                reasons.append("built with debug information (the CodeView record names a .pdb, "
+                               "but no path beyond the file name)")
     # Imports are a weak signal on their own: any real program resolves APIs dynamically and
     # allocates memory. Only the combination (a notable API in a packed or embedded-PE file)
     # is worth ranking highly, so the wording says what is actually true.
@@ -1588,6 +1955,11 @@ def build_report(path: Path, out_dir: Path | None, *, max_bytes: int = DEFAULT_M
         "wrapper": pyinstaller,
         "other_wrapper_markers": wrappers,
         "language": detect_language(data, pe=pe),
+        # How the binary was built. The CodeView record alone is worth this: it names the .pdb's
+        # path on the build machine, and therefore the project and source layout, without the
+        # .pdb being present. A .pdb that shipped beside it is reported separately and matched,
+        # because a PDB that is not this binary's PDB must not have its names attributed to it.
+        "debug_info": analyse_debug_info(data, pe, path),
         "embedded_executables": embedded,
         "destructive": destructive,
         "iocs": iocs,
@@ -1597,7 +1969,8 @@ def build_report(path: Path, out_dir: Path | None, *, max_bytes: int = DEFAULT_M
         "unpack_plan": [],
         "executed_target": False,
     }
-    report["assessment"] = assess(pe, packer, strings, iocs, imports, embedded, destructive)
+    report["assessment"] = assess(pe, packer, strings, iocs, imports, embedded, destructive,
+                                 report["debug_info"])
     report["unpack_plan"] = plan_unpacking(report)
     report["yara_draft"] = draft_yara(report)
     return report
