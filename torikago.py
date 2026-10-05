@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.5.0"
+_SOURCE_VERSION = "1.6.0"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -2564,6 +2564,9 @@ def main(argv=None) -> int:
                          "(default: DIR/manifest.jsonl)")
     ap.add_argument("--corpus-check", metavar="PATH",
                     help="load a manifest and report what it holds")
+    ap.add_argument("--posture", action="store_true",
+                    help="read-only report on what is protecting this machine and where it "
+                         "conflicts with itself. Writes no setting")
     ap.add_argument("--scan-limit", type=int, default=200, metavar="N",
                     help="with --scan/--corpus-write, analyse at most N files (default 200)")
     ap.add_argument("--scan-only", metavar="EXT,EXT",
@@ -2588,6 +2591,42 @@ def main(argv=None) -> int:
 
     if args.quarantine_list:
         return list_quarantine(Path(args.quarantine_list))
+
+    if args.posture:
+        import security_posture as sp
+
+        state = sp.posture()
+        if args.json:
+            print(json.dumps(state, ensure_ascii=False, indent=1))
+            return 0
+        d = state["defender"]
+        print("defender")
+        for label, key in (("engine enabled", "antivirus_enabled"),
+                           ("service enabled", "service_enabled"),
+                           ("real-time", "realtime"),
+                           ("behaviour monitor", "behavior_monitor"),
+                           ("signature age", "signature_age_days")):
+            print("  %-18s %s" % (label, d.get(key)))
+        print()
+        print("registered with Security Center")
+        for prod in state["registered"].get("products", []):
+            print("  %-28s state=%s" % (prod["name"], prod["state"]))
+        print()
+        print("scanning exclusions  <- silent protection loss that outlives its reason")
+        ex = state["exclusions"]
+        for label, key in (("paths", "paths"), ("extensions", "extensions"),
+                           ("processes", "processes")):
+            print("  %-11s %s" % (label, ", ".join(ex.get(key, [])) or "(none)"))
+        print()
+        print("findings")
+        found = sp.findings(state)
+        for f in found:
+            print("  [%-8s] %s" % (f["level"], f["what"]))
+        if not found:
+            print("  nothing to flag")
+        print()
+        print(state["note"])
+        return 0
 
     if args.corpus_write or args.corpus_check:
         import corpus as corpus_mod
