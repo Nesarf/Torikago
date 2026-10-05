@@ -401,3 +401,66 @@ class TestTheTwoProvidersAreGoodAtDifferentThings(unittest.TestCase):
         import inspect
         src = inspect.getsource(sf.main)
         self.assertIn("bulk source, not a targeted one", " ".join(src.split()))
+
+
+class TestTheHandoffVerdictIsVisible(unittest.TestCase):
+    """Found by exercising the download path for the first time, which is also when `--handoff` was
+    run without `--out`.
+
+    The results went **only** into `report.json`, and that file is written **only** when `--out` is
+    given. So for anyone who did not pass `--out`, asking for a handoff produced no output at all and
+    looked like a broken flag. A capability nobody can see is one nobody has.
+    """
+
+    def test_the_verdict_is_printed_after_the_file_details(self):
+        """Printed *before* the details, an output tail showed only the static working -- and people
+        read the end. A conclusion belongs at the end."""
+        src = (HERE.parent / "torikago.py").read_text(encoding="utf-8")
+        i = src.index("        print_human(report)")
+        j = src.index("_print_handoff(report.get(\"handoff\"))")
+        self.assertGreater(j, i, "the handoff verdict is printed before the file details")
+
+    def test_printing_cannot_break_the_command(self):
+        """The analysis has already succeeded by the time anything is printed."""
+        import io
+        from contextlib import redirect_stdout
+        import torikago as tk
+
+        class Hostile:
+            def get(self, _k, _d=None):
+                raise RuntimeError("boom")
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            tk._print_handoff(Hostile())          # must not raise
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_nothing_asked_prints_nothing(self):
+        import io
+        from contextlib import redirect_stdout
+        import torikago as tk
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            tk._print_handoff(None)
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_an_unavailable_engine_is_reported_not_hidden(self):
+        import io
+        from contextlib import redirect_stdout
+        import torikago as tk
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            tk._print_handoff({"engines": {"defender": {"ok": False, "reason": "not installed"}}})
+        self.assertIn("not installed", buf.getvalue())
+
+    def test_the_note_says_the_verdict_is_not_ours(self):
+        import io
+        from contextlib import redirect_stdout
+        import torikago as tk
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            tk._print_handoff({"engines": {"defender": {"ok": True, "verdicts": [
+                {"file": "x.exe", "clean": True, "line": "found no threats"}]}}})
+        text = buf.getvalue()
+        self.assertIn("not this tool's", text)
+        self.assertIn("not the same as the file being safe", text)

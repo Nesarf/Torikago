@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.11.0"
+_SOURCE_VERSION = "1.12.0"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -2531,6 +2531,41 @@ def print_human(report: dict) -> None:
     print("executed    : no (never)")
 
 
+def _print_handoff(handoff) -> None:
+    """The engines' verdicts, after everything else. Never raises: the analysis already succeeded.
+
+    Wrapped for the same reason the boundary voice is: by the time anything is printed the report
+    exists, and a formatting bug must not change an exit code or lose it.
+    """
+    if not handoff:
+        return
+    try:
+        for engine, result in (handoff.get("engines") or {}).items():
+            print()
+            print("%s:" % engine)
+            if not result.get("ok"):
+                print("    unavailable: %s" % (result.get("reason") or "no reason given"))
+                if result.get("hint"):
+                    print("    %s" % result["hint"])
+                continue
+            for verdict in result.get("verdicts", []):
+                state = "no threats reported" if verdict.get("clean") else "THREAT REPORTED"
+                print("    %-44s %s" % (str(verdict.get("file"))[:44], state))
+                if verdict.get("line"):
+                    print("        %s" % str(verdict["line"])[:96])
+            for err in result.get("errors", []):
+                print("    %s: %s" % (err.get("file"), err.get("error")))
+            owner = result.get("owner") or {}
+            if owner.get("third_party"):
+                print("    note: %s also holds the Security Center registration, so this verdict "
+                      "is not the whole picture" % ", ".join(owner["third_party"]))
+        print()
+        print("These are the engines' verdicts, not this tool's. A clean result means the engine did "
+              "not detect anything, which is not the same as the file being safe.")
+    except Exception:                                          # noqa: BLE001
+        return
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="torikago",
@@ -2928,6 +2963,11 @@ def main(argv=None) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=1))
     elif not args.quiet:
         print_human(report)
+        # Printed last, after the file's own details. It was printed *before* them, and a reader who
+        # looks at the end of the output -- which is what people do -- saw only the static details
+        # and could reasonably conclude that --handoff had produced nothing. A conclusion belongs at
+        # the end, not buried under the working.
+        _print_handoff(report.get("handoff"))
     return 0
 
 
