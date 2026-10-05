@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.3.4"
+_SOURCE_VERSION = "1.4.0"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -1564,6 +1564,117 @@ CLAMAV_CANDIDATES = (
 )
 
 
+DEFENDER_PLATFORM_DIR = Path(r"C:\ProgramData\Microsoft\Windows Defender\Platform")
+
+
+def find_defender() -> str | None:
+    """Locate MpCmdRun.exe, newest platform build first, or None.
+
+    Absence is reported rather than worked around, the same rule as ClamAV: on a machine where
+    Defender has been removed or disabled there is nothing to ask, and pretending otherwise would
+    be worse than saying so.
+    """
+    env = os.environ.get("MPCMDRUN_PATH")
+    if env and Path(env).is_file():
+        return env
+    if not DEFENDER_PLATFORM_DIR.is_dir():
+        return None
+    # Platform builds are version-named directories and only one is current; the newest is the one
+    # whose engine the service is using.
+    builds = sorted((d for d in DEFENDER_PLATFORM_DIR.iterdir() if d.is_dir()),
+                    key=lambda d: d.name, reverse=True)
+    for build in builds:
+        exe = build / "MpCmdRun.exe"
+        if exe.is_file():
+            return str(exe)
+    return None
+
+
+def defender_owner() -> dict:
+    """Which antivirus products Windows Security Center has registered.
+
+    Exists because "Defender found nothing" is only meaningful if Defender is the engine doing the
+    watching. Where a third-party product owns the registration, Defender's engine can still run a
+    scan while real-time protection is somebody else's -- so the answer is reported rather than
+    assumed, and never smoothed over.
+    """
+    if os.name != "nt":
+        return {"available": False, "reason": "not Windows"}
+    import subprocess
+    try:
+        proc = subprocess.run(
+            # The console output encoding is forced to UTF-8 first. Without it PowerShell emits
+            # product names in the system code page -- cp936 on a Chinese Windows -- and reading
+            # them as UTF-8 turns "Tencent PC Manager" into mojibake. Product names are exactly
+            # the thing being asked for here, so getting them wrong is getting the answer wrong.
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+             "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
+             "Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | "
+             "Select-Object -ExpandProperty displayName"],
+            capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"available": False, "reason": "could not query Security Center: %s" % exc}
+    names = [l.strip() for l in proc.stdout.decode("utf-8", "replace").splitlines() if l.strip()]
+    return {"available": True, "products": names,
+            "third_party": [n for n in names if "defender" not in n.lower()]}
+
+
+def scan_with_defender(paths, *, mpcmdrun: str | None = None, timeout: int = 900) -> dict:
+    """Ask Windows Defender for a verdict on `paths`. Reads the files; runs nothing.
+
+    **`-DisableRemediation` is load-bearing.** Without it this call removes or quarantines whatever
+    it dislikes, so asking for an opinion would silently destroy the thing being asked about. With
+    it, the call is a question.
+    """
+    exe = mpcmdrun or find_defender()
+    if not exe:
+        return {"ok": False, "engine": "windows-defender", "executed": False,
+                "reason": "MpCmdRun.exe was not found; Defender may not be installed",
+                "hint": "set MPCMDRUN_PATH to a specific MpCmdRun.exe"}
+    import subprocess
+    targets = [(p if isinstance(p, Path) else Path(p)) for p in paths]
+    verdicts, errors = [], []
+    for target in targets:
+        cmd = [exe, "-Scan", "-ScanType", "3", "-File", str(target), "-DisableRemediation"]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        except (OSError, subprocess.SubprocessError) as exc:
+            errors.append({"file": target.name, "error": str(exc)})
+            continue
+        out = (proc.stdout or b"").decode("utf-8", "replace")
+        err = (proc.stderr or b"").decode("utf-8", "replace")
+        text = out + err
+        # `-DisableRemediation` also stops the exit code from carrying the verdict, so the verdict
+        # has to come from the text. "found no threats" is the clean answer; anything else that
+        # mentions a threat is treated as one, and the raw line is kept so the reading can be
+        # checked rather than trusted.
+        clean = "found no threats" in text.lower()
+        line = next((l.strip() for l in text.splitlines()
+                     if "threat" in l.lower()), "")
+        verdicts.append({
+            "file": target.name,
+            "path": str(target),
+            "clean": clean,
+            "line": line or None,
+            "returncode": proc.returncode,
+        })
+    # `ok` means a verdict was actually obtained, matching scan_with_clamav. Returning ok=True with
+    # an empty verdict list because the engine path was wrong would read as "it found nothing" --
+    # the single most dangerous way this function can fail, since the reader concludes the file is
+    # clean when in fact nobody looked at it.
+    if not verdicts:
+        return {"ok": False, "engine": "windows-defender", "executed": False,
+                "reason": ("no verdict was obtained from %s" % exe),
+                "errors": errors, "verdicts": [], "owner": defender_owner()}
+    return {"ok": True, "engine": "windows-defender", "executed": False,
+            "remediation_disabled": True, "verdicts": verdicts, "errors": errors,
+            "owner": defender_owner(),
+            # Said every time, because the temptation to read this as our own conclusion is the
+            # whole risk of having it.
+            "note": ("This is Defender's verdict, not this tool's. Torikago reaches no conclusion "
+                     "about whether a file is malicious, and nothing here is a detection.")}
+
+
 def find_clamav() -> str | None:
     """Locate clamscan, or None. Absence is reported, never worked around."""
     env = os.environ.get("CLAMSCAN_PATH")
@@ -2437,6 +2548,9 @@ def main(argv=None) -> int:
                     help="triage every file in a directory and report which ones stand out")
     ap.add_argument("--scan-av", action="store_true",
                     help="also ask ClamAV for a verdict (reads files, never runs them)")
+    ap.add_argument("--handoff", choices=("defender", "clamav", "both"),
+                    help="hand the file to a real judgement engine and report ITS verdict. "
+                         "Reads the file; runs nothing; removes nothing")
     ap.add_argument("--feed", choices=("misp", "stix", "both"),
                     help="write threat-intelligence output for sharing (misp=xml, stix=json)")
     args = ap.parse_args(argv)
@@ -2487,6 +2601,24 @@ def main(argv=None) -> int:
             base = Path(report["unpack"]["out_dir"])
             targets = [path] + [base / r["path"] for r in (report.get("inside") or [])]
         report["antivirus"] = scan_with_clamav(targets)
+    if args.handoff:
+        # Same target set as --scan-av: the file, plus whatever an unpack found inside it. The inner
+        # executables are usually the ones worth asking about -- the outer wrapper is an envelope.
+        targets = [path]
+        if report.get("unpack", {}).get("ok"):
+            base = Path(report["unpack"]["out_dir"])
+            targets += [base / r["path"] for r in (report.get("inside") or [])]
+        engines = {}
+        if args.handoff in ("defender", "both"):
+            engines["defender"] = scan_with_defender(targets)
+        if args.handoff in ("clamav", "both"):
+            engines["clamav"] = scan_with_clamav(targets)
+        report["handoff"] = {
+            "engines": engines,
+            "executed": False,
+            "note": ("These are the engines' verdicts, not this tool's. Torikago reaches no "
+                     "conclusion about whether a file is malicious."),
+        }
     if args.out:
         out = Path(args.out)
         out.mkdir(parents=True, exist_ok=True)

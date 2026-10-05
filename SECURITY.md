@@ -51,6 +51,58 @@ attacking:
   They are emitted as XML and JSON through the standard library's serialisers, not by string
   concatenation; a sample that can inject structure into either output is a finding.
 
+## Claims this tool will not make, even if asked to
+
+These are not limitations to be worked around later. They are the properties that make the tool
+trustworthy, and weakening one would make it worse rather than more capable.
+
+### It will never say a file is safe
+
+It reports what is **in** a file. It does not conclude that the file is **harmless**, and no result
+it produces should be read that way — including a clean verdict from a judgement engine it handed
+the file to, which is that engine's opinion about a sample and not a property of your machine.
+
+The distinction is not pedantry. `AV engine found nothing` and `this is harmless` differ in every
+case where the sample is new, packed, or targeted, which is exactly the case this tool exists for.
+
+### It may build a defanged variant, but never call it a cure
+
+There is a real capability here and it is worth having: take a sample, cut out the hostile parts, fill
+the gaps so the program still runs, and keep the result. On a PyInstaller build this is more tractable
+than it sounds, because the payload lives at the **Python** level — replacing a malicious `.pyc` in the
+PYZ with a stub that does nothing is a far smaller act than surgery on machine code.
+
+So the tool offers it (`nanodesu neutralize`), under constraints that are not negotiable, because
+without them the output is worse than useless:
+
+1. **The original is never modified, moved, or deleted.** The sample is the only thing a real engine
+   can still judge, and it stays exactly where it was. The variant is a new file.
+2. **Every change is recorded**, byte range by byte range, with what was there before — and the record
+   is enough to reverse the transformation. That is the difference between a transformation and an
+   act of faith.
+3. **The output is never described as clean, safe, or fixed** — not in the code, not in the report,
+   not in the file's name. It is a *variant*, and the name says so.
+4. **The report states what could not be verified.** A stub proves a module no longer runs; it does
+   not prove nothing else in the file is hostile.
+
+**Why the naming discipline is the whole point.** Editing a signed binary invalidates its signature,
+and changing the bytes changes the hash — so a modified sample stops matching threat intelligence,
+blocklists and AV caches. It will therefore *always scan clean*. Not because it is clean, but because
+**nobody has seen it** — and the tool would be manufacturing files that no engine flags while calling
+that a result. The difference between `I removed the malicious code` and `this is now safe` is the
+difference between a real capability and one that gets somebody hurt.
+
+### It will not replace your antivirus
+
+Windows Security Center is backed by real-time monitoring, behavioural interception, kernel-level
+components and a sample feed that no Python unpacker has. Claiming that role would mean promising
+coverage that does not exist, and a user who believes it will be less protected than one who never
+heard the claim.
+
+What this tool does instead is the part it can do honestly: **hand the evidence to the engine that is
+actually running on your machine and report that engine's verdict, attributed.** `--handoff` exists
+for that and for nothing more.
+
 ## What this tool explicitly does not defend against
 
 * **Running the sample.** It will not, and it cannot be asked to. If you need behaviour, that
