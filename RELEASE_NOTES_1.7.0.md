@@ -33,7 +33,13 @@ from the outside.**
 plausible signed path that exists and runs and passes every check. That sentence is in the output, not
 only in the docs — the same rule the rest of this project follows.
 
-## Three things this got wrong first, all kept in the code
+## Four things this got wrong first, all kept in the code
+
+**The name check depended on the file existing.** `C:\Windows\System32	askmgr.exe` is not a file
+on a Linux runner, so the existence branch returned early and **the Defendnot shape was never
+reached** — CI failed on the assertion and was right to. The defect was in the check rather than only
+in the test: an injected fake *must* point at a trusted component, and that is visible in the **name**
+whatever the platform thinks of the path. The name check now runs first and independently.
 
 **The productState bit layout was guessed.** The format is not officially documented. The flag is now
 **derived by measurement**: Defender's `0x61100` has bit 12 set and Defender's own API reports

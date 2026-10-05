@@ -154,6 +154,18 @@ def check_declaration(product: dict) -> dict:
         return out
 
     path = Path(exe)
+    # The name check comes FIRST and does not depend on the file existing.
+    #
+    # Found by CI failing on a Linux runner: `C:\Windows\System32	askmgr.exe` is not a file
+    # there, so the existence branch returned early and the Defendnot shape was never reached. The
+    # defect was in the check, not only in the test -- an injected fake must point at a trusted
+    # component, and that is visible in the *name* whatever the platform thinks of the path.
+    if path.name.lower() in TRUSTED_BUT_NOT_SECURITY:
+        out["contradictions"].append(
+            "declares itself the protection product while pointing at %s, a signed Microsoft "
+            "component that is not security software -- which is what an injected fake would "
+            "produce, because it must point at something the system already trusts" % path.name)
+
     if not path.is_file():
         out["checks"].append("declared executable does not exist")
         # Only a contradiction if the product simultaneously claims to be protecting right now.
@@ -163,12 +175,6 @@ def check_declaration(product: dict) -> dict:
         return out
 
     out["checks"].append("declared executable exists")
-    if path.name.lower() in TRUSTED_BUT_NOT_SECURITY:
-        out["contradictions"].append(
-            "declares itself the protection product while pointing at %s, a signed Microsoft "
-            "component that is not security software -- which is what an injected fake would "
-            "produce, because it must point at something the system already trusts"
-            % path.name)
     return out
 
 
