@@ -1648,7 +1648,9 @@ def plan_unpacking(report: dict) -> list:
     kind = report["identified_as"]["kind"]
     if kind in ("zip", "gzip", "bzip2", "xz", "7z", "cab"):
         plan.append({"step": f"unpack the {kind} container",
-                     "run": "use 7zr.exe (present at E:\\DaShaoHuo\\tools\\7zr.exe)",
+                     "run": (f"7z x <file> -o<out>  (any 7-Zip build reads {kind}; "
+                             f"Python's own zipfile/tarfile/gzip/bz2/lzma cover most of "
+                             f"these when 7-Zip is not installed)"),
                      "needs_execution": False})
     if report["embedded_executables"]:
         plan.append({"step": "carve the embedded PE image(s) out for separate analysis",

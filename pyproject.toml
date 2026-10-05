@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "triage-static"
-version = "0.8.0"
+version = "0.9.0"
 description = "Static triage for an unknown executable: identify, unpack, extract indicators. Never executes the target."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -16,6 +16,14 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Security",
 ]
+
+[project.optional-dependencies]
+# Nanodesu! is discovered at runtime, never required at install time. `triage` declares no
+# dependencies on purpose: it is meant to run on a machine you do not control, so every
+# dependency it does not have is one less thing a reader has to audit. The PyInstaller half
+# is therefore an extra rather than a requirement -- `pip install triage-static[pyinstaller]`
+# makes it turnkey, and the base install stays empty.
+pyinstaller = ["nanodesu>=1.2,<2"]
 
 [project.scripts]
 triage = "triage:main"

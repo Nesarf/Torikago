@@ -53,26 +53,29 @@ class TestUnpackModule(unittest.TestCase):
             self.assertFalse(res["ok"])
 
     def test_missing_nanodesu_reports_a_hint_not_a_crash(self):
+        """The same intent as before, expressed against the current discovery chain.
+
+        It used to neutralise a hard-coded candidate list; that list is gone, so the test
+        now points the environment variable at a path that does not exist. Either way the
+        contract under test is unchanged: a missing tool must produce a result dict with a
+        reason, never an exception.
+        """
         import os
         old = os.environ.get(unp.NANODESU_ENV)
-        old_candidates = unp.CANDIDATE_PATHS
         try:
-            os.environ[unp.NANODESU_ENV] = ""
-            unp.CANDIDATE_PATHS = ()
             with tempfile.TemporaryDirectory() as t:
+                os.environ[unp.NANODESU_ENV] = str(Path(t) / "absent-nanodesu.py")
                 p = Path(t) / "x.exe"
                 p.write_bytes(b"MZ")
                 res = unp.unpack_pyinstaller(p, Path(t) / "out")
-                # nanodesu may still be found next to the workspace, so accept either, but
-                # the failure must be a dict with a reason rather than an exception.
                 self.assertIn("executed", res)
                 self.assertIs(res["executed"], False)
+                self.assertIn("reason", res)
         finally:
             if old is None:
                 os.environ.pop(unp.NANODESU_ENV, None)
             else:
                 os.environ[unp.NANODESU_ENV] = old
-            unp.CANDIDATE_PATHS = old_candidates
 
     def test_find_nanodesu_honours_the_environment_variable(self):
         import os

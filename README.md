@@ -57,8 +57,26 @@ pip install .                 # provides the `triage` command
 python triage.py --help       # or run it directly
 ```
 
-For PyInstaller targets, put `nanodesu.py` on the same machine — `triage` detects the
-archive and tells you the exact command to unpack it.
+For PyInstaller targets, either install the extra — `pip install triage-static[pyinstaller]` —
+or put `nanodesu.py` somewhere `triage` can find it:
+
+1. `NANODESU_PATH`, pointing at a file or a directory
+2. an installed `nanodesu` module
+3. `nanodesu.py` next to `triage`, or one directory up
+
+`triage` itself declares **no dependencies**, deliberately: it is meant to run on a machine you
+do not trust, so every dependency it does not have is one less thing a reader has to audit. The
+PyInstaller half is an extra rather than a requirement for that reason.
+
+If it is absent, the failure says so and names the fix rather than leaving you to work it out:
+
+```
+Nanodesu! was not found, so this PyInstaller archive cannot be unpacked.
+Install it with: pip install nanodesu   (or set NANODESU_PATH to a nanodesu.py checkout)
+```
+
+It calls Nanodesu! through its library API when that is available, and falls back to the CLI for
+versions before 1.3. Either way there is no subprocess and no shell in the middle.
 
 ## Usage
 
