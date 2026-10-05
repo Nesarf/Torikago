@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.3.3"
+_SOURCE_VERSION = "1.3.4"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -1005,6 +1005,35 @@ _DEBUG_TYPE_NAMES = {
 }
 
 
+def detect_pyinstaller_at(path: Path) -> dict | None:
+    """Wrapper detection for a file, reading the end of it rather than the beginning.
+
+    A CArchive cookie is the last occurrence of `MEI\014\013\012\013\016` in the file, so the tail
+    is where to look. Reading only a head works for a small file and silently fails for a large one,
+    which is how a nested 8.5 MB wrapper went unnoticed: the head is 4 MB and the cookie is not in
+    it. `detect_pyinstaller` is unchanged and correct given a complete buffer.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    # Enough to hold the cookie and the table it points at; a cookie needs only its own 88 bytes,
+    # but the reader that follows wants the payload length and TOC offset to be plausible.
+    window = min(size, 8 << 20)
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(size - window)
+            tail = fh.read(window)
+    except OSError:
+        return None
+    found = detect_pyinstaller(tail)
+    if found is None:
+        return None
+    # The offsets are relative to the archive's base, which the tail may not contain; that is
+    # fine here because only the presence and the Python version are wanted.
+    return found
+
+
 # --------------------------------------------------------------------------- #
 
 MEI_COOKIE = b"MEI\x0c\x0b\x0a\x0b\x0e"
@@ -1349,11 +1378,18 @@ PEEK_BYTES = 4 << 20          # 4 MB of each inner file is enough to type it and
 
 
 def find_inner_executables(root: Path, limit: int = 40) -> list:
-    """Executable files inside an unpacked tree, so the interesting ones surface first.
+    """Executable files inside an unpacked tree, most interesting first.
 
-    Only the head of each file is read: a 200 MB inner DLL does not need to be loaded to be
-    typed and have its PE header parsed, and reading it whole would defeat the point of a
-    tool that is supposed to be cheap to point at anything.
+    Only the head of each file is read: a 200 MB inner DLL does not need to be loaded to be typed
+    and have its PE header parsed, and reading it whole would defeat the point of a tool that is
+    supposed to be cheap to point at anything.
+
+    The order is by interest rather than by name, which it used to be -- and that mattered: sorted
+    by path, a real PyInstaller build fills this list with `binary___bz2.pyd` and its neighbours
+    while a nested *executable* sitting in the same directory never appears, because 40 alphabetically
+    early stdlib extensions crowd it out. The most interesting thing inside a wrapper is another
+    wrapper, so size leads (a nested executable is megabytes; a stdlib extension is tens of
+    kilobytes) and packed or strong-signal files come before plain ones.
     """
     out = []
     if not root.is_dir():
@@ -1394,6 +1430,9 @@ def find_inner_executables(root: Path, limit: int = 40) -> list:
                 if fn.lower() in SUSPICIOUS_IMPORTS and fn.lower() not in STRONG_SIGNAL_IMPORTS}),
             "entropy_max": max((s["entropy"] for s in (pe["sections"] if pe else [])), default=0.0),
             "truncated_head": size > PEEK_BYTES,
+            # From the file's tail, because the cookie lives at the end and the head above does not
+            # contain it for anything larger than PEEK_BYTES.
+            "wrapper": (detect_pyinstaller_at(p) or {}).get("wrapper"),
         })
         # The inner files are the point of unpacking -- the wrapper was only the envelope -- so
         # each one gets the same debug treatment as a top-level sample. Driven from the path, not
@@ -1410,9 +1449,15 @@ def find_inner_executables(root: Path, limit: int = 40) -> list:
                     "sibling_pdb": (info.get("sibling_pdb") or {}).get("format"),
                     "pdb_matches_binary": info.get("pdb_matches_binary"),
                 }
-        if len(out) >= limit:
-            break
-    return out
+    # Rank before truncating, so the limit keeps the entries that matter instead of the ones that
+    # happen to sort first.
+    out.sort(key=lambda r: (
+        -(1 if r.get("packer") not in ("none", "n/a") else 0),
+        -(1 if r.get("suspicious_imports") else 0),
+        -r["size"],
+        r["path"],
+    ))
+    return out[:limit]
 
 
 def scan_tree(root: Path, *, limit: int = 200) -> dict:
@@ -1896,6 +1941,78 @@ def should_stage(report: dict, min_attention: int = 1, min_weak: int = 5) -> tup
 
 # --------------------------------------------------------------------------- #
 # report
+NESTED_UNPACK_MAX_DEPTH = 3
+NESTED_UNPACK_MAX_TOTAL = 10
+
+
+def _unpack_nested(inner: list, parent_dest: Path, *, depth: int,
+                   max_depth: int = NESTED_UNPACK_MAX_DEPTH,
+                   max_total: int = NESTED_UNPACK_MAX_TOTAL,
+                   visited: set | None = None) -> dict:
+    """Unpack any PyInstaller wrappers among `inner`, and follow what they contain.
+
+    Returns {"unpacked": [...], "skipped": [...]} rather than raising: one broken nested archive
+    must not cost the analysis of the others.
+
+    The bounds and why each exists:
+      depth    a wrapper in a wrapper is worth following; the cost is files and time
+      total    depth alone does not bound the work -- one level can hold thirty archives
+      visited  an archive containing a copy of itself would otherwise recurse to the depth limit,
+               writing a complete tree at every level
+      confinement  unpacking writes files, so an inner path must resolve strictly inside the
+               parent's output directory and never somewhere the parent did not already own
+    """
+    visited = set() if visited is None else visited
+    unpacked, skipped = [], []
+    if unpack_mod is None or depth > max_depth:
+        return {"unpacked": unpacked, "skipped": skipped}
+
+    for row in inner:
+        if len(unpacked) >= max_total:
+            skipped.append({"path": row.get("path"),
+                            "why": "the nested-unpack limit of %d was reached" % max_total})
+            continue
+        target = (parent_dest / row.get("path", "")).resolve()
+        try:
+            # The entry name came out of an archive, so it is untrusted like any other.
+            target.relative_to(parent_dest.resolve())
+        except (ValueError, OSError):
+            skipped.append({"path": row.get("path"),
+                            "why": "resolves outside the unpack directory"})
+            continue
+        if not target.is_file():
+            continue
+        if target in visited:
+            skipped.append({"path": row.get("path"), "why": "already unpacked in this run"})
+            continue
+        # Only another wrapper is worth a second pass; an ordinary inner DLL is already described
+        # by the row it came from. The row's `wrapper` field is authoritative because it was read
+        # from the file's tail -- re-deriving it from a head peek here is what silently skipped the
+        # nested wrapper this function exists to follow.
+        if not row.get("wrapper"):
+            continue
+        visited.add(target)
+
+        child_dest = target.parent / (target.stem + "_unpacked")
+        res = unpack_mod.unpack_pyinstaller(target, child_dest, with_pyc=True)
+        record = {"path": row.get("path"), "out_dir": str(child_dest), "depth": depth,
+                  "ok": bool(res.get("ok"))}
+        if res.get("ok"):
+            inner2 = find_inner_executables(child_dest)
+            record["inside"] = len(inner2)
+            unpacked.append(record)
+            if inner2:
+                deeper = _unpack_nested(inner2, child_dest, depth=depth + 1,
+                                        max_depth=max_depth, max_total=max_total - len(unpacked),
+                                        visited=visited)
+                unpacked.extend(deeper["unpacked"])
+                skipped.extend(deeper["skipped"])
+        else:
+            record["reason"] = res.get("reason") or "the nested unpack failed"
+            skipped.append(record)
+    return {"unpacked": unpacked, "skipped": skipped}
+
+
 # --------------------------------------------------------------------------- #
 
 def hashes_of(data: bytes, part: int = 0) -> dict:
@@ -2147,6 +2264,14 @@ def build_report_with_unpack(path: Path, out_dir: Path | None, unpack: bool, *,
         if res.get("ok"):
             report["inside"] = find_inner_executables(dest)
             report["inside_scan"] = scan_tree(dest)
+            # A wrapper can hold another wrapper, and stopping at the first level leaves the
+            # interesting file one step further in. Bounded, because unpacking writes files.
+            # The report shows a readable slice; the recursion looks further, because the wrapper
+            # worth following is not necessarily in the first forty names.
+            candidates = find_inner_executables(dest, limit=200)
+            deeper = _unpack_nested(candidates, dest, depth=1)
+            if deeper["unpacked"] or deeper["skipped"]:
+                report["nested"] = deeper
         else:
             report["unpack"]["hint"] = ("point %s at nanodesu.py, or install it with "
                                         "pip install nanodesu" % unpack_mod.NANODESU_ENV)
