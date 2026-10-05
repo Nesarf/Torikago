@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.3.2"
+_SOURCE_VERSION = "1.3.3"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -1721,7 +1721,13 @@ def build_stix_bundle(report: dict) -> dict:
                 "pattern_type": "stix",
                 "valid_from": now,
                 "indicator_types": ["malicious-activity"],
-                "x_torikago_source_file": file_obj["id"],
+                # The file this was extracted from, in a standard field. It used to be an
+                # undeclared `x_torikago_source_file` custom property, which made the object --
+                # and therefore the whole bundle -- invalid under STIX 2.1: custom properties have
+                # to be declared by an ExtensionDefinition in the same bundle. Verified by parsing
+                # the output with the official `stix2` library, which rejected it outright.
+                "description": "%s, extracted from %s (%s)" % (
+                    kind, Path(report["file"]).name, h["sha256"]),
             })
     return {"type": "bundle", "id": "bundle--" + str(uuid.uuid4()), "objects": objects}
 
