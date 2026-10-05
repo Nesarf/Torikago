@@ -48,7 +48,24 @@ try:
 except ImportError:                                # pragma: no cover - unpack.py ships with us
     unpack_mod = None
 
-VERSION = "0.8.0"
+def _version() -> str:
+    """The version of the installed distribution, or of this file.
+
+    Reading it from the package metadata means the number cannot drift from `pyproject.toml` --
+    which it had: the module reported 0.8.0 across five releases while the package said otherwise.
+    A caller loading this module by path (as the sibling tool does when it finds the file on disk)
+    has no distribution to ask, so the constant below is the fallback for exactly that case.
+    """
+    try:
+        from importlib.metadata import version as _dist_version
+        return _dist_version("torikago")
+    except Exception:
+        return _SOURCE_VERSION
+
+
+# Kept only for the by-path case. When the package is installed this value is not used.
+_SOURCE_VERSION = "1.3.0"
+VERSION = _version()
 
 # --------------------------------------------------------------------------- #
 # format identification (magic bytes, because extensions lie)
