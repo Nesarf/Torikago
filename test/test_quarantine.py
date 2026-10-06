@@ -209,3 +209,82 @@ class TestQuarantineCli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestCapabilityOutranksHarm(unittest.TestCase):
+    """The order is capability, then harmfulness, then stubbornness.
+
+    A target worth a VM slot is one that took real work to build. Harm is *intent* and capability is
+    *fact*, and this tool deals in facts -- so harm is second. It is not removed: an irreversible
+    consequence still stops everything, because that is the one thing worth stopping for regardless of
+    how strong anything is.
+    """
+
+    def _report(self, **kw):
+        base = {"assessment": {"attention": 0, "reasons": []},
+                "destructive": {"highest": None, "findings": []}}
+        base.update(kw)
+        return base
+
+    def test_capability_is_named_first_and_quoted(self):
+        report = self._report(embedded_executables=[{"name": "a.exe"}, {"name": "b.exe"}],
+                              other_wrapper_markers=["UpX", "MEI"])
+        stage, why = tri.should_stage(report, min_attention=99)
+        self.assertTrue(stage)
+        self.assertTrue(why.startswith("capability"), why)
+        # The reasons travel with the decision, so the operator can disagree with the judgement
+        # rather than only with the verdict.
+        self.assertIn("embedded_executables", why)
+
+    def test_harm_still_stops_everything(self):
+        """Second does not mean ignored. An irreversible consequence overrides."""
+        report = self._report(destructive={"highest": "critical", "findings": [{"x": 1}]})
+        stage, why = tri.should_stage(report)
+        self.assertTrue(stage)
+        self.assertIn("destructive", why)
+
+    def test_difficulty_alone_is_the_weakest_reason(self):
+        """Being hard to read is not a reason to look at something -- that is the third position."""
+        report = self._report()
+        report["assessment"] = {"attention": 5, "reasons": ["a", "b", "c", "d", "e"]}
+        report["packer"] = {"verdict": "looks packed"}
+        stage, why = tri.should_stage(report, min_weak=5)
+        self.assertTrue(stage)
+        self.assertIn("weak signals", why)
+
+    def test_a_quiet_report_does_not_stage(self):
+        stage, why = tri.should_stage(self._report())
+        self.assertFalse(stage)
+        self.assertIn("nothing flagged", why)
+
+    def test_destructiveness_is_not_a_capability_signal(self):
+        """**The mistake the first ordering made.** Ranking by destructiveness and calling the result
+        a judgement of the target conflates intent with capability, and the two are reported
+        separately for a reason. A destructive finding must not raise the capability level.
+        """
+        report = self._report(destructive={"highest": "critical",
+                                           "findings": [{"capability": "raw disk write"}]})
+        cap = tri.evaluate_capability(report)
+        self.assertEqual(cap["level"], "none", cap)
+        self.assertNotIn("destructive", " ".join(cap["reasons"]))
+
+    def test_a_wrapper_keeps_its_name(self):
+        """A reason the operator cannot check is not a reason. Losing "PyInstaller" and printing
+        "present" was a real regression, caught by an existing test."""
+        cap = tri.evaluate_capability({"wrapper": {"wrapper": "PyInstaller"}})
+        self.assertIn("PyInstaller", " ".join(cap["reasons"]))
+
+    def test_three_or_more_signals_reads_as_high(self):
+        cap = tri.evaluate_capability({
+            "wrapper": {"wrapper": "PyInstaller"},
+            "embedded_executables": [1, 2],
+            "other_wrapper_markers": ["a"],
+        })
+        self.assertEqual(cap["level"], "high", cap)
+
+    def test_the_capability_verdict_is_recorded_on_the_report(self):
+        """So a reader can see what the gate thought of it, separately from whether it staged."""
+        report = self._report(wrapper={"wrapper": "PyInstaller"})
+        tri.should_stage(report)
+        self.assertIn("capability", report)
+        self.assertEqual(report["capability"]["level"], "some")

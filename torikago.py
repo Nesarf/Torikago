@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.20.2"
+_SOURCE_VERSION = "1.20.3"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -2262,26 +2262,115 @@ def high_confidence_reasons(report: dict) -> list:
             if any(m.lower() in r.lower() for m in STRONG_REASON_MARKERS)]
 
 
+# **What "strong" means, kept apart from "harmful".** A predator that goes after capability rather
+# than damage is judging what the thing *can do*, not what it is *trying to do* -- and those are
+# different measurements that the report already carries separately.
+#
+# Capability is complexity and reach: how many layers it was built with, how much code is there, how
+# much of it a static read cannot finish. A sample that is silent and deep is a stronger animal than
+# one that shouts a single destructive string, because the first one took real work to build and the
+# second one took a keyword.
+#
+# **`destructive` is deliberately absent.** Folding harm into this score is the mistake the first
+# version of the ordering made: it ranked by destructiveness and called the result a judgement of the
+# target. Harm keeps its own place, second, and it stays there for the reason the gate already gives --
+# an irreversible consequence is the one thing worth stopping for regardless of how strong anything is.
+CAPABILITY_SIGNALS = (
+    "wrapper",                    # a recognised self-extracting layer: work went into it
+    "other_wrapper_markers",      # additional wrapper shapes
+    "embedded_executables",       # carries other programs inside it
+)
+
+
+def evaluate_capability(report: dict) -> dict:
+    """How strong this object looks, with the reasons named rather than a bare number.
+
+    Returns `level` (none / some / high) plus the evidence, so the gate can quote its reasoning the way
+    it already does for every other decision. **A score without its reasons is exactly the kind of
+    thing this tool refuses to print anywhere else.**
+    """
+    reasons = []
+    # **The name, not the fact that there is one.** A wrapper arrives as a mapping whose inner key
+    # holds the name, and an earlier version of this printed "wrapper: present" -- losing the one
+    # piece of evidence that makes the reason checkable. A test caught it, which is what the test was
+    # for: the operator can disagree with "PyInstaller", not with "present".
+    for key in ("wrapper",):
+        value = report.get(key)
+        if not value:
+            continue
+        if isinstance(value, str):
+            reasons.append("%s: %s" % (key, value))
+        elif isinstance(value, dict):
+            name = value.get(key) or value.get("name") or value.get("kind")
+            reasons.append("%s: %s" % (key, name if name else "present"))
+    for key in CAPABILITY_SIGNALS[1:]:
+        value = report.get(key) or []
+        if value:
+            reasons.append("%s: %d" % (key, len(value)))
+
+    plan = report.get("unpack_plan") or []
+    if any(step.get("needs_execution") for step in plan):
+        # A step that needs the sample run to finish means a static read cannot see the whole of it.
+        reasons.append("unpacking needs execution, so static reading does not reach the end")
+
+    branches = report.get("branches") or []
+    if len(branches) >= 2:
+        reasons.append("binary likely has %d branches" % len(branches))
+
+    code = 0
+    for entry in report.get("imports") or []:
+        code += len(entry.get("functions") or [])
+    if code >= 100:
+        reasons.append("%d imported functions" % code)
+
+    declared = report.get("declared_dependencies")
+    if declared:
+        reasons.append("%d declared dependencies" % len(declared))
+
+    pe = report.get("pe") or {}
+    sections = pe.get("sections") or []
+    if len(sections) >= 6:
+        reasons.append("%d sections" % len(sections))
+
+    level = "none"
+    if len(reasons) >= 3:
+        level = "high"
+    elif reasons:
+        level = "some"
+    return {"level": level, "reasons": reasons, "count": len(reasons)}
+
+
 def should_stage(report: dict, min_attention: int = 1, min_weak: int = 5) -> tuple:
     """Decide whether a file is worth a VM slot, and say why.
 
     The gate is about evidence the operator can check, not a score, and it is calibrated on a
-    corpus rather than guessed:
+    corpus rather than guessed.
 
-    * a destructive finding at high or critical severity always stages -- it is the one
-      consequence that cannot be walked back
-    * a high-confidence reason stages, and the reason is quoted so the operator can disagree
-    * weak signals alone need several of them, because one keyword hit is nearly universal
+    **The order is capability, then harmfulness, then stubbornness**, and the order is the point:
+
+    * **capability first** -- what it can do, judged from complexity and reach. This tool goes after
+      strong things, and a target worth a slot is one that took real work to build.
+    * **harmfulness second**, and it still overrides everything at high severity: an irreversible
+      consequence is the one thing worth stopping for regardless of how strong anything is. It is
+      second rather than first because harm is *intent* and capability is *fact*, and this tool deals
+      in facts.
+    * **stubbornness third** -- how hard it is to read. Deciding to look at something because it is
+      difficult, rather than because it is strong or dangerous, is the wrong reason.
     """
+    capability = evaluate_capability(report)
+    report["capability"] = capability
+
+    if capability["level"] in ("high", "some"):
+        # Quoted, so the operator can disagree with the judgement rather than only with the verdict.
+        return True, "capability %s: %s" % (capability["level"],
+                                            "; ".join(capability["reasons"])[:240])
+
     destructive = report.get("destructive") or {}
     if destructive.get("highest") in ("high", "critical"):
         return True, "destructive capability reported at %s" % destructive["highest"]
     strong = high_confidence_reasons(report)
     if strong and report["assessment"]["attention"] >= min_attention:
         return True, "attention: %s" % "; ".join(strong)[:240]
-    if report.get("wrapper"):
-        return True, "%s wrapper: it is a self-extracting program" % \
-                     report["wrapper"]["wrapper"]
     weak = report["assessment"]["attention"]
     if weak >= min_weak:
         return True, "%d weak signals: %s" % (
