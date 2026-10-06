@@ -199,3 +199,131 @@ def animate(frames, path: Path, *, duration: int = 120, loop: int = 0):
 # 两组强调色之间的最小感知距离 **0.288**。经验阈值：>0.15 在 32×32 下仍能区分，<0.08 会糊。
 # 所以 32×32 下两个角色靠色相就能分开——**莉莉丝暖红、阿玛丽莉丝冷紫**，
 # 而共用的中性色正是"同一套工具"该有的统一感。
+
+# --------------------------------------------------------------------------- #
+# 字符网格 → PNG
+# --------------------------------------------------------------------------- #
+#
+# **格式来源可核**：`SbName/yoyopixel`（MIT）的 `pixelart-skill.md`，它的主张是
+# "any text-only LLM can draw"——**LLM 只写结构化文本，渲染交给别的东西**。
+#
+# 而这解决的是我们真正卡住的那件事：**我这一侧没有图像生成能力。**
+# 有了这个格式，"画"这个动作退化成"写一个字符串数组"，而那是文本工作。
+#
+# 格式（照抄来源）：
+#
+#     palette: { '.': 'transparent', 'S': '#F8B277', ... }   字母 → 颜色，'.' 固定是透明
+#     pixels:  [ "..SS..", ".SHHS.", ... ]                   每个字符串一行，每个字符一个像素
+#
+# **字母是语义的**（S=skin, H=hair, E=eyes, B=body），不是索引——
+# 所以改一行注释就能读懂一张图，而换色只需要动 palette 一处。
+#
+# 与 `to_pixel_art` 的关系：那条路是"把已有的图变成像素风"，这条是"从零画一张"。
+# **两条都要**：前者处理参考图与截图，后者处理我们要放进工具里的原始资源。
+
+def from_grid(grid: dict, *, letters: dict | None = None):
+    """Build an RGBA image from a character grid.
+
+    `grid` is the `<name>.json` form of the format above: `width`, `height`, `palette`, `pixels`.
+    Raises rather than guessing when the grid does not match its declared size -- **a sprite that is
+    silently the wrong shape shows up as a rendering bug much later**, in a place with no connection
+    to the data that caused it.
+    """
+    from PIL import Image
+    width = int(grid["width"])
+    height = int(grid["height"])
+    palette = dict(grid["palette"])
+    if letters:
+        palette.update(letters)
+    rows = list(grid["pixels"])
+    if len(rows) != height:
+        raise ValueError("grid says %d rows, got %d" % (height, len(rows)))
+    for i, row in enumerate(rows):
+        if len(row) != width:
+            raise ValueError("row %d is %d wide, grid says %d" % (i, len(row), width))
+
+    im = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    px = im.load()
+    for y, row in enumerate(rows):
+        for x, ch in enumerate(row):
+            if ch == ".":
+                continue                     # transparent, and it is a palette member here
+            try:
+                spec = palette[ch]
+            except KeyError:
+                # **Unmapped characters are an error, not a blank pixel.** A typo in a grid would
+                # otherwise read as a hole in the art, which looks deliberate.
+                raise ValueError("row %d col %d uses %r, which the palette does not define"
+                                 % (y, x, ch))
+            if spec in (None, "transparent"):
+                continue
+            px[x, y] = _to_rgba(spec)
+    return im
+
+
+def _to_rgba(spec):
+    if isinstance(spec, (tuple, list)):
+        if len(spec) == 4:
+            return tuple(spec)
+        if len(spec) == 3:
+            return tuple(spec) + (255,)
+        raise ValueError("colour must be 3 or 4 components, got %r" % (spec,))
+    text = str(spec).lstrip("#")
+    if len(text) == 3:                        # #abc
+        text = "".join(c * 2 for c in text)
+    if len(text) == 6:
+        text += "ff"
+    if len(text) != 8:
+        raise ValueError("cannot read colour %r" % (spec,))
+    return tuple(int(text[i:i + 2], 16) for i in (0, 2, 4, 6))
+
+
+def load_grid(path):
+    """Read a grid from JSON. `.js` files that declare `const ART = {...}` are handled too, because
+    that is how the source repository ships them and re-typing one by hand is a transcription error
+    waiting to happen."""
+    import json
+    text = Path(path).read_text(encoding="utf-8")
+    try:
+        return json.loads(text)
+    except ValueError:
+        start = text.index("{")
+        end = text.rindex("}") + 1
+        body = text[start:end]
+        # The source format is JS object literal: unquoted keys and single-quoted strings.
+        import re
+        body = re.sub(r"([{,;\s])([A-Za-z_][A-Za-z0-9_]*)\s*:", r'"":', body)
+        body = body.replace("'", '"')
+        body = re.sub(r",(\s*[}\]])", r"", body)
+        return json.loads(body)
+
+
+def export_grid(grid: dict, path, *, size: int | None = None, colors=None):
+    """Grid → PNG (or GIF if it is a list of grids), through the same palette rules."""
+    im = from_grid(grid)
+    if colors:
+        # A grid that uses its own letters is already palette-limited by construction; this only
+        # applies when the caller wants it forced into the shared palette as well.
+        im = im.convert("RGBA").quantize(palette=pal_image(colors)).convert("RGBA")
+    if size:
+        im = im.resize((size, size), 3)       # 3 = NEAREST
+    p = Path(path)
+    im.save(str(p))
+    return p
+
+# --------------------------------------------------------------------------- #
+# 实测记录：网格路线（2026-10-06）
+# --------------------------------------------------------------------------- #
+#
+# 8×8 网格 → RGBA → 放大 128×128 = 484 字节。两条错误路径都验证过：
+# 行数不符报错（不猜）、字符未定义报错（不静默留空洞）。
+#
+# **这条路线填的是先前那个空缺**：`to_pixel_art` 处理"把已有的图变成像素风"，
+# 而"从零画"需要图像生成能力——**我这一侧没有。**
+# 网格格式把"画"退化成"写字符串数组"，那是我能做的。
+#
+# 容量上的实话：**32×32 = 1024 个字符 ≈ 手写的上限。**
+# 64×64 是 4096 个字符，那个量级不该手写——真要那尺寸，走 `to_pixel_art` 或跑图。
+#
+# 另一条待试的路（本仓库 `TODO.md` 里记着）：从设定图裁出表情差分后走 `to_pixel_art`，
+# 而不是从零画。两条不冲突——**前者给"像"，后者给"可控"。**
