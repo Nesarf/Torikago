@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.18.0"
+_SOURCE_VERSION = "1.19.0"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -2696,7 +2696,13 @@ def _print_handoff(handoff) -> None:
                 continue
             for verdict in result.get("verdicts", []):
                 state = "no threats reported" if verdict.get("clean") else "THREAT REPORTED"
-                print("    %-44s %s" % (str(verdict.get("file"))[:44], state))
+                name = str(verdict.get("file"))
+                # Marked in the row rather than left to the trailing note. A modified copy and the
+                # original produce rows of identical shape, and a reader skimming a long list will
+                # not go back to read a paragraph at the end.
+                if "_defanged" in name or name.endswith("_neutralized"):
+                    state += "  [variant]"
+                print("    %-44s %s" % (name[:44], state))
                 if verdict.get("line"):
                     print("        %s" % str(verdict["line"])[:96])
             for err in result.get("errors", []):
@@ -3051,6 +3057,36 @@ def main(argv=None) -> int:
         if report.get("unpack", {}).get("ok"):
             base = Path(report["unpack"]["out_dir"])
             targets += [base / r["path"] for r in (report.get("inside") or [])]
+
+        # **A variant produced from this file is also worth asking about, and was previously
+        # invisible to this step.** Neutralising a sample produces a second artifact whose whole
+        # purpose is to be handed to an engine, and the handoff only ever looked at the original and
+        # the unpacked contents -- so the one file the repair was for was the one file nobody asked
+        # about. The chain stopped one link short of its own reason for existing.
+        #
+        # Declared first (a caller that ran the repair can name its outputs), then detected beside the
+        # target, because somebody who just repaired a file should not have to name it again.
+        variants = []
+        for declared in (report.get("variants") or []):
+            candidate = Path(declared)
+            if candidate.is_file():
+                variants.append(candidate)
+        if path is not None:
+            for candidate in sorted(path.parent.glob(path.stem + "_defanged*")):
+                if candidate.is_file() and candidate not in variants and candidate != path:
+                    variants.append(candidate)
+        if variants:
+            targets += variants
+            # Recorded as variants rather than folded in silently. A verdict on a modified file says
+            # something different from a verdict on the original, and a reader comparing two handoffs
+            # has to be able to tell which one they are looking at.
+            report["handoff_variants"] = [str(v) for v in variants]
+            report["handoff_variant_note"] = (
+                "These are modified copies. Editing a binary changes its hash and invalidates its "
+                "signature, so a clean verdict on one means the engine did not recognise it -- not "
+                "that it is clean. The original is unchanged and remains the thing an engine can "
+                "actually judge.")
+
         engines = {}
         if args.handoff in ("defender", "both"):
             engines["defender"] = scan_with_defender(targets)

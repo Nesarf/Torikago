@@ -735,3 +735,102 @@ class TestASampleIsNeverLeftAtRestReadable(unittest.TestCase):
     def test_there_is_a_download_cap(self):
         self.assertTrue(hasattr(sf, "MAX_DOWNLOAD_BYTES"))
         self.assertLessEqual(sf.MAX_DOWNLOAD_BYTES, 1 << 30)
+
+
+class TestAHandoffAlsoAsksAboutTheVariant(unittest.TestCase):
+    """The chain stopped one link short of its own reason for existing.
+
+    Neutralising a sample produces a second artifact **whose whole purpose is to be handed to an
+    engine** — and the handoff only ever looked at the original and the unpacked contents. So the one
+    file the repair was for was the one file nobody asked about.
+    """
+
+    def _fixture(self):
+        import sys
+        sys.path.insert(0, str(HERE))
+        import test_torikago as tt
+        tmp = _fixtures.tmpdir("hv-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        original = tmp / "sample.exe"
+        original.write_bytes(tt.build_pe())
+        return tmp, original
+
+    def test_a_sibling_variant_is_added_to_the_targets(self):
+        import io
+        from contextlib import redirect_stdout
+        import torikago as tk
+
+        tmp, original = self._fixture()
+        variant = tmp / "sample_defanged.exe"
+        variant.write_bytes(original.read_bytes() + b"PATCHED")
+
+        seen = {}
+        real = tk.scan_with_defender
+
+        def spy(targets, **kw):
+            seen["targets"] = [str(t) for t in targets]
+            return {"ok": True, "verdicts": [], "errors": []}
+
+        tk.scan_with_defender = spy
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                tk.main([str(original), "--handoff", "defender"])
+        finally:
+            tk.scan_with_defender = real
+        self.assertIn(str(variant), seen.get("targets", []),
+                      "the variant was not handed to the engine")
+
+    def test_the_variant_is_named_as_a_variant_not_folded_in(self):
+        """A verdict on a modified file says something different from a verdict on the original."""
+        import io
+        from contextlib import redirect_stdout
+        import torikago as tk
+
+        tmp, original = self._fixture()
+        (tmp / "sample_defanged.exe").write_bytes(original.read_bytes() + b"PATCHED")
+        captured = {}
+        real = tk.scan_with_defender
+        tk.scan_with_defender = lambda t, **kw: {"ok": True, "verdicts": [], "errors": []}
+        try:
+            out = tmp / "rep"
+            with redirect_stdout(io.StringIO()):
+                tk.main([str(original), "--handoff", "defender", "--out", str(out)])
+            import json
+            captured = json.loads((out / "report.json").read_text(encoding="utf-8"))
+        finally:
+            tk.scan_with_defender = real
+        self.assertTrue(captured.get("handoff_variants"), captured.get("handoff_variants"))
+        note = captured.get("handoff_variant_note") or ""
+        self.assertIn("modified copies", note)
+        # The reason a clean verdict means less here must travel with the claim.
+        self.assertIn("did not recognise it", note)
+        self.assertIn("not that it is clean", note)
+
+    def test_no_variant_means_no_extra_keys(self):
+        """Over-reporting is its own failure: a note about variants that do not exist is noise."""
+        import io
+        from contextlib import redirect_stdout
+        import torikago as tk
+
+        tmp, original = self._fixture()
+        real = tk.scan_with_defender
+        tk.scan_with_defender = lambda t, **kw: {"ok": True, "verdicts": [], "errors": []}
+        try:
+            out = tmp / "rep2"
+            with redirect_stdout(io.StringIO()):
+                tk.main([str(original), "--handoff", "defender", "--out", str(out)])
+            import json
+            captured = json.loads((out / "report.json").read_text(encoding="utf-8"))
+        finally:
+            tk.scan_with_defender = real
+        self.assertNotIn("handoff_variants", captured)
+
+    def test_a_declared_variant_is_used_when_present(self):
+        """A caller that ran the repair can name its outputs; detection is the fallback, not the
+        only route."""
+        src = (HERE.parent / "torikago.py").read_text(encoding="utf-8")
+        i = src.index("if args.handoff:")
+        body = src[i:i + 2600]
+        self.assertIn('report.get("variants")', body,
+                      "a declared output is no longer honoured")
