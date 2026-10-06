@@ -198,3 +198,64 @@ class TestTheManifestDoesNotMeasureItself(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestARowSaysHowMuchOfTheFileWasMeasured(unittest.TestCase):
+    """Three different things used to look identical in the manifest.
+
+    A row measured over the whole file, a row measured over a prefix because a scan was bounded, and a
+    row from an older schema that never recorded coverage all had the same shape -- so **"this field
+    changed" and "this field stopped being measured" read the same in a diff.** That is the exact
+    distinction the no-under-reporting commitment exists to keep, and it was missing from the corpus.
+    """
+
+    def test_a_truncated_measurement_is_partial_and_names_what_stopped(self):
+        out = corpus.coverage_of({"truncated_head": True, "attention": 1})
+        self.assertEqual(out["measurement"], corpus.MEASUREMENT_PARTIAL)
+        self.assertIn("truncated_head", out["stopped_at"])
+
+    def test_a_row_with_coverage_bookkeeping_is_complete(self):
+        out = corpus.coverage_of({"limits": {"imports": 256}, "scanned": 1 << 20})
+        self.assertEqual(out["measurement"], corpus.MEASUREMENT_COMPLETE)
+
+    def test_a_row_that_says_nothing_is_unknown_not_complete(self):
+        """**The important one.** A tidy-looking old row is not evidence of a complete measurement --
+        it is evidence that nobody asked. Calling it complete would be the tool reassuring itself.
+        """
+        out = corpus.coverage_of({"attention": 0, "packer": "none", "size": 100})
+        self.assertEqual(out["measurement"], corpus.MEASUREMENT_UNKNOWN)
+        self.assertIn("records nothing", out["reason"])
+
+    def test_the_truncation_keys_are_matched_by_suffix_so_a_new_cap_is_not_missed(self):
+        """A cap added later writes `something_truncated`; the check has to see it without an edit."""
+        for key in ("sections_truncated", "pyz_truncated", "whatever_truncated"):
+            with self.subTest(key=key):
+                out = corpus.coverage_of({key: True})
+                if key in corpus.TRUNCATION_KEYS:
+                    self.assertEqual(out["measurement"], corpus.MEASUREMENT_PARTIAL)
+                else:
+                    # Not in the tuple, so it is unknown rather than misread as complete.
+                    self.assertEqual(out["measurement"], corpus.MEASUREMENT_UNKNOWN)
+
+    def test_every_new_entry_carries_coverage(self):
+        entry = corpus.entry_from_row({"path": "a.exe", "attention": 0}, sha="0" * 64)
+        self.assertIn("coverage", entry)
+        self.assertIn(entry["coverage"]["measurement"],
+                      (corpus.MEASUREMENT_COMPLETE, corpus.MEASUREMENT_PARTIAL,
+                       corpus.MEASUREMENT_UNKNOWN))
+
+    def test_the_real_manifest_is_honest_about_itself(self):
+        """Every existing row predates the question, so every one must read as unknown -- except any
+        that recorded a cap. This is checked against the shipped manifest rather than a fixture,
+        because the point is what the corpus actually says about 1161 real measurements.
+        """
+        from pathlib import Path as _P
+        manifest = _P(__file__).resolve().parent.parent / "corpus" / "manifest.jsonl"
+        if not manifest.exists():
+            self.skipTest("no manifest in this checkout")
+        import json
+        rows = [json.loads(l) for l in manifest.read_text(encoding="utf-8").splitlines() if l.strip()]
+        self.assertGreater(len(rows), 100, "the manifest is not the real one")
+        known = {corpus.coverage_of(r)["measurement"] for r in rows}
+        self.assertNotIn(corpus.MEASUREMENT_COMPLETE, known,
+                         "rows predating the coverage question are claiming to be complete")

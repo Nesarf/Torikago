@@ -56,6 +56,49 @@ def sha256_file(path: Path, *, chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
+# What a measurement's coverage was, as a value a diff can compare.
+#
+# **The corpus could not tell three different things apart.** A row measured over the whole file, a row
+# measured over a prefix because a scan was bounded, and a row from an older schema that never recorded
+# coverage all looked identical -- so "this field changed" and "this field stopped being measured" read
+# the same, which is exactly the distinction the no-under-reporting commitment is about.
+MEASUREMENT_COMPLETE = "complete"
+MEASUREMENT_PARTIAL = "partial"
+MEASUREMENT_UNKNOWN = "unknown"
+
+# Keys in an assessment row whose truth means the measurement stopped short. Matched by suffix so a new
+# cap cannot be added without being noticed here, and the list is what ends up in the row.
+TRUNCATION_KEYS = (
+    "truncated", "truncated_head", "functions_truncated", "thunks_truncated",
+    "sections_truncated", "pyz_truncated", "archive_size_limited", "decompression_limited",
+)
+
+
+def coverage_of(row: dict) -> dict:
+    """What the measurement behind this row actually covered.
+
+    **Derived from the row rather than declared by the writer**, because a writer that has to remember
+    to declare it will forget, and the evidence is already there: every bounded scan in this project
+    records that it stopped. A row that says nothing is `unknown`, not `complete` -- the absence of a
+    truncation flag and the absence of any coverage bookkeeping are different facts, and the second is
+    what a row from an older schema has.
+    """
+    if not isinstance(row, dict):
+        return {"measurement": MEASUREMENT_UNKNOWN, "reason": "not a row"}
+
+    halted = sorted(k for k in TRUNCATION_KEYS if row.get(k))
+    if halted:
+        return {"measurement": MEASUREMENT_PARTIAL, "stopped_at": halted}
+
+    # A row that carries no coverage bookkeeping at all cannot be called complete, however tidy it
+    # looks. `limits` is written by scans that know they have caps; a row without it predates the
+    # question being asked.
+    if "limits" in row or "scanned" in row:
+        return {"measurement": MEASUREMENT_COMPLETE}
+    return {"measurement": MEASUREMENT_UNKNOWN,
+            "reason": "this row records nothing about how much of the file was measured"}
+
+
 def entry_from_row(row: dict, *, sha: str, stamp: str | None = None) -> dict:
     """One manifest entry from an assessment row.
 
@@ -78,6 +121,9 @@ def entry_from_row(row: dict, *, sha: str, stamp: str | None = None) -> dict:
     # without carrying a hundred names into a diff nobody will read.
     if isinstance(row.get("all_imports"), list):
         entry["import_count"] = len(row["all_imports"])
+    # Whether this measurement saw the whole file. Carried on the row so a diff can compare it: a field
+    # that changed is news, and a field that stopped being measured is different news.
+    entry["coverage"] = coverage_of(row)
     return entry
 
 
