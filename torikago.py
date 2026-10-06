@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.16.0"
+_SOURCE_VERSION = "1.17.0"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -435,10 +435,31 @@ def parse_pe(data: bytes) -> dict | None:
         names = ["export", "import", "resource", "exception", "security", "basereloc",
                  "debug", "architecture", "globalptr", "tls", "load_config", "bound_import",
                  "iat", "delay_import", "com_descriptor"]
-        for i, nm in enumerate(names):
+
+        # **How many directories the file says it has, read before reading any of them.** The
+        # previous version iterated its own list of names unconditionally, so a PE declaring
+        # `NumberOfRvaAndSizes = 2` still had whatever follows the optional header parsed as
+        # directories -- which is the section table. The result was not a crash: it was **fabricated
+        # evidence**, a plausible-looking import or TLS or debug directory built from section headers.
+        # Silent wrong evidence again, and this one is worse than the others because the invented
+        # directories are exactly the fields a triage report leans on.
+        declared = None
+        try:
+            declared = struct.unpack_from("<I", data, opt_off + (108 if is64 else 92))[0]
+        except struct.error:
+            pass
+        usable = len(names) if declared is None else min(declared, len(names))
+        # Bounded by the file as well: a file may claim more directories than it has room for.
+        room = (len(data) - ddir_off) // 8
+        usable = max(0, min(usable, room))
+        for i in range(usable):
             rva, size = struct.unpack_from("<II", data, ddir_off + i * 8)
             if rva and size:
-                directories[nm] = {"rva": rva, "size": size}
+                directories[names[i]] = {"rva": rva, "size": size}
+        if declared is not None and declared < len(names):
+            # Recorded rather than merely obeyed, because a short directory table is itself a fact
+            # about the file and a reader comparing two reports should be able to see it.
+            directories["_declared_count"] = declared
         # section table
         sec_off = opt_off + opt_size
         sections = []
@@ -485,10 +506,40 @@ def parse_pe(data: bytes) -> dict | None:
 
 
 def rva_to_offset(pe: dict, rva: int) -> int | None:
+    """File offset for an RVA, or None when that RVA has no bytes in the file.
+
+    **Virtual size and file-backed size are not the same thing, and the previous version treated them
+    as one** by mapping `[vaddr, vaddr + max(vsize, rawsize))`. A section commonly has
+    `vsize > rawsize` -- the tail is zero-filled at load time and simply absent from the file -- so an
+    RVA in that tail produced an offset one past the section's real bytes, and the caller then read
+    **whatever happened to be at that file position**. Not a crash and not an exception: a wrong name
+    in an import table, a wrong string, a fabricated indicator. On a triage tool that feeds a verdict
+    and a YARA draft, silently wrong evidence is the worst failure mode available.
+
+    So the rule is now the honest one: **file bytes only.** An RVA in a virtual-only tail has no file
+    offset, and `None` is the correct answer for it. Every caller already treats `None` as "not
+    readable" and skips -- which is right, and was the intent all along.
+    """
     for s in pe["sections"]:
-        if s["vaddr"] <= rva < s["vaddr"] + max(s["vsize"], s["rawsize"]):
+        span = min(s["rawsize"], s["vsize"]) if s["vsize"] else s["rawsize"]
+        if s["vaddr"] <= rva < s["vaddr"] + span:
             return s["rawptr"] + (rva - s["vaddr"])
     return None
+
+
+def rva_is_virtual_only(pe: dict, rva: int) -> bool:
+    """True when the RVA lies in a section but past the bytes the file actually carries.
+
+    Kept separate from `rva_to_offset` because the two questions have different answers, and a caller
+    may want to report the second one: "inside the section, but no file bytes" is a fact about the
+    file, while "no such RVA" is a different fact.
+    """
+    for s in pe["sections"]:
+        span = min(s["rawsize"], s["vsize"]) if s["vsize"] else s["rawsize"]
+        virtual_end = s["vaddr"] + max(s["vsize"], s["rawsize"])
+        if s["vaddr"] + span <= rva < virtual_end:
+            return True
+    return False
 
 
 # Parser safety caps. Named and referenced in the result rather than repeated as literals, because a
@@ -1995,6 +2046,27 @@ def quarantine_copy(source: Path, quarantine_dir: Path, report: dict, *,
             shutil.copyfileobj(src, dst, 1 << 20)
     except OSError as exc:
         return {"ok": False, "reason": "could not copy: %s" % exc, "executed": False}
+
+    # **Hashed again after the copy, because the name claims the hash and the copy is what a reader
+    # will trust.** The report was built from the source at one moment and the bytes were read at
+    # another, so a file replaced in between produces a shuttle entry whose name says one sample while
+    # the file holds another -- a TOCTOU that needs no attacker to be possible, only a directory
+    # something else is writing to. Silently mismatched evidence is worse than a refusal for the same
+    # reason a mislabelled sample is worse than a missing one: every later measurement inherits it.
+    staged_sha = hashlib.sha256()
+    try:
+        with staged.open("rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                staged_sha.update(block)
+    except OSError as exc:
+        return {"ok": False, "reason": "could not re-read the copy: %s" % exc, "executed": False}
+    staged_sha = staged_sha.hexdigest()
+    if staged_sha.lower() != str(sha).lower():
+        staged.unlink(missing_ok=True)
+        return {"ok": False, "executed": False, "stage": "verify",
+                "reason": ("the copy does not hash to the file that was analysed, so it was removed "
+                           "rather than left carrying a name that describes something else"),
+                "expected": sha, "got": staged_sha}
 
     # The record travels with the copy: whoever opens the shuttle later needs the verdict and
     # the evidence, not just a file with an opaque name.

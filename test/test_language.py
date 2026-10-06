@@ -54,11 +54,17 @@ def with_dotnet_layout(base: bytes, *, cli_rva=0x2000, md_rva=0x2100,
     need = sec["rawptr"] + 0x1400
     if len(buf) < need:
         buf.extend(b"\x00" * (need - len(buf)))
-    # Grow the section too: its header has to cover RVA 0x2100, or rva_to_offset will
-    # refuse the metadata address and the fixture will look like a plain binary.
+    # Grow the section too: its header has to cover RVA 0x2100 with **file-backed bytes**, or
+    # `rva_to_offset` refuses the metadata address and the fixture looks like a plain binary.
+    #
+    # **Both fields, and at the right offsets.** This wrote VirtualSize=0x1000 (not the 0x1400 the
+    # comment described) and then wrote 0x1400 to +16, which is VirtualAddress -- so the section
+    # claimed a virtual size smaller than its raw size and a virtual address of 0x1400. The old
+    # `max(vsize, rawsize)` mapping happened to cover RVA 0x2100 anyway, which is why the mistake was
+    # invisible until the mapping stopped conflating the two.
     opt_size = 240 if pe["bits"] == 64 else 224
     sec_table_off = 0x80 + 24 + opt_size
-    struct.pack_into("<I", buf, sec_table_off + 8, 0x1000)     # VirtualSize
+    struct.pack_into("<I", buf, sec_table_off + 8, 0x1400)     # VirtualSize
     struct.pack_into("<I", buf, sec_table_off + 16, 0x1400)    # SizeOfRawData
 
     # point the COM descriptor directory at the CLI header (well, at its RVA)

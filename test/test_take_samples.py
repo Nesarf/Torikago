@@ -123,3 +123,70 @@ class TestItNeverRunsAnything(unittest.TestCase):
         src = (HERE.parent / "take_samples.py").read_text(encoding="utf-8")
         self.assertNotIn("unpack_pyinstaller", src)
         self.assertNotIn("nanodesu", src)
+
+
+class TestTheStagedCopyIsHashedAfterCopying(unittest.TestCase):
+    """The staged name carries the hash of the file that was *analysed*.
+
+    The report was built from the source at one moment and the bytes were read at another, so a file
+    replaced in between produces a shuttle entry whose name says one sample while the file holds
+    another. **That needs no attacker, only a directory something else writes to** -- and a
+    mislabelled sample is worse than a missing one, because every later measurement inherits the
+    label.
+    """
+
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("tri", HERE.parent / "torikago.py")
+        self.tri = importlib.util.module_from_spec(spec)
+        sys.modules["tri"] = self.tri
+        spec.loader.exec_module(self.tri)
+        self.tmp = _fixtures.tmpdir("qc-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+
+    def _report(self, sha, size=0):
+        """A fragment of the real report, shaped by reading it rather than guessing.
+
+        **Two rounds of KeyError before this was right** -- md5 and then size -- both because the
+        fixture was written from assumption. The real report keeps all of these under `hashes`,
+        including `size`, which is not where a reader would look for it; a test standing in for
+        another object has to be copied from that object.
+        """
+        return {"hashes": {"sha256": sha, "sha1": "0" * 40, "md5": "0" * 32, "size": size},
+                "assessment": {"attention": [], "reasons": []},
+                "identified_as": {"label": "test"}, "executed": False}
+
+    def test_a_matching_copy_is_staged(self):
+        import hashlib
+        src = self.tmp / "sample.exe"
+        src.write_bytes(b"content\n")
+        sha = hashlib.sha256(b"content\n").hexdigest()
+        r = self.tri.quarantine_copy(src, self.tmp / "shuttle", self._report(sha), reason="test")
+        self.assertTrue(r["ok"], r)
+
+    def test_a_mismatched_copy_is_removed_not_left_mislabelled(self):
+        """The report says one hash and the file has another. The entry must not survive."""
+        src = self.tmp / "sample.exe"
+        src.write_bytes(b"content\n")
+        wrong = "0" * 64
+        shuttle = self.tmp / "shuttle"
+        r = self.tri.quarantine_copy(src, shuttle, self._report(wrong), reason="test")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["stage"], "verify")
+        self.assertIn("does not hash to the file that was analysed", r["reason"])
+        left = list(shuttle.glob("*")) if shuttle.is_dir() else []
+        self.assertEqual(left, [], "a mislabelled copy was left in the shuttle: %s" % left)
+
+    def test_the_failure_names_both_hashes(self):
+        """Without both, a reader cannot tell a race from a collision without redoing the work."""
+        src = self.tmp / "s.exe"
+        src.write_bytes(b"x")
+        r = self.tri.quarantine_copy(src, self.tmp / "s2", self._report("a" * 64), reason="t")
+        self.assertEqual(r["expected"], "a" * 64)
+        self.assertNotEqual(r["got"], r["expected"])
+
+    def test_the_verification_happens_after_the_copy(self):
+        """Checked by position, so reordering the function cannot silently disarm this."""
+        import inspect
+        body = inspect.getsource(self.tri.quarantine_copy)
+        self.assertLess(body.index("copyfileobj"), body.index("staged_sha"))

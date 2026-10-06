@@ -196,6 +196,10 @@ def build_pe_with_codeview(pdb_path: str, guid: bytes, age: int = 1,
 
     struct.pack_into("<Q", out, opt + 24, 0x140000000)  # image base
 
+    # How many data directories this file claims. Needed since parse_pe started obeying it: without
+    # it the field reads as zero, no directories are parsed, and the fixture looks like a PE with no
+    # debug directory at all -- which is a pass for the wrong reason rather than a failure.
+    struct.pack_into("<I", out, opt + 108, 16)       # NumberOfRvaAndSizes (PE32+ offset)
     struct.pack_into("<I", out, opt + 56, align)     # section alignment
 
     struct.pack_into("<I", out, opt + 60, align)     # file alignment
