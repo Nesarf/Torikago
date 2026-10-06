@@ -317,3 +317,65 @@ class TestTheDirectoryCountIsObeyedNotAssumed(unittest.TestCase):
         self.assertIn("for i in range(usable)", body)
         self.assertNotIn("for i, nm in enumerate(names)", body,
                          "the unconditional iteration over all fifteen names is back")
+
+
+class TestAScanReachesPastTheOldCaps(unittest.TestCase):
+    """Two searches stopped at a fixed offset, and both failures read as absence.
+
+    The boot-sector scan stopped at 8 MB and the runtime-marker search at 6 MB, so evidence past
+    either point produced no finding -- and **"not found" and "not there" looked identical**, which
+    is the single distinction this tool exists to keep. Each test places its evidence beyond the old
+    cut, so it fails against the previous code.
+    """
+
+    def test_a_boot_sector_past_the_old_8mb_cut_is_found(self):
+        """A 512-byte MBR shape at 9 MB. The old scan did not look there."""
+        filler = b"\x90" * (9 << 20)
+        mbr = bytearray(512)
+        mbr[0:4] = b"\xfa\x33\xc0\x8e"                  # boot code
+        # Four well-formed partition entries. The validator is strict on purpose -- it is what
+        # stopped a 51 MB DLL being reported as carrying boot code -- so each entry needs a known
+        # type **and** in-range geometry: `end_sector` must be 1..63, which is what the first
+        # version of this fixture left at zero, so the whole table was rejected.
+        for i in range(4):
+            off = 446 + i * 16
+            mbr[off + 4] = 0x83                          # Linux partition type
+            mbr[off + 7] = 0x3F                          # end_sector = 63 (bits 0-5 of byte 7)
+            # start_lba and sector count must both be non-zero: the validator rejects an entry whose
+            # geometry is empty, which is how it tells a partition table from a window shaped like
+            # one. Two rounds of this fixture were rejected before the fields it insists on were
+            # read out of the validator instead of assumed.
+            mbr[off + 8:off + 12] = (2048).to_bytes(4, "little")
+            mbr[off + 12:off + 16] = (204800).to_bytes(4, "little")
+        mbr[510] = 0x55
+        mbr[511] = 0xAA
+        data = filler + bytes(mbr)
+        hits = tk.find_boot_sector_pattern(data)
+        self.assertTrue(hits, "a boot sector past 8 MB was not found")
+        # A list of records, not of offsets -- read from the return rather than assumed.
+        self.assertGreater(hits[0]["offset"], 8 << 20)
+
+    def test_a_runtime_marker_past_the_old_cut_is_found(self):
+        """A marker at 7 MB, beyond the old 6 MB window."""
+        marker = b"Go build ID:"
+        data = b"\x00" * (7 << 20) + marker + b"\x00" * 64 + b"go1.22"
+        lang = tk.detect_language(data)
+        all_markers = " ".join(" ".join(h.get("markers", [])) for h in lang.get("all", []))
+        self.assertIn("Go", lang.get("all") and str(lang) or "",
+                      "a runtime marker past 6 MB was not found: %s" % (lang,))
+
+    def test_narrowing_is_still_possible_on_purpose(self):
+        """A caller may want a window; the point is that it is no longer the silent default."""
+        data = b"\x00" * (2 << 20) + b"Go build ID:"
+        narrowed = tk.detect_language(data, limit=1 << 20)
+        full = tk.detect_language(data)
+        self.assertNotEqual(str(narrowed), str(full))
+
+    def test_the_pattern_scan_reports_a_shortfall(self):
+        """Where a cap is genuinely needed it must be reported, because a missing pattern and an
+        unlooked-for pattern are different facts."""
+        src = (HERE.parent / "torikago.py").read_text(encoding="utf-8")
+        flat = " ".join(src.split())
+        self.assertIn("pattern scan was not exhaustive", flat)
+        self.assertNotIn("min(s[\"rawsize\"], 4 << 20)", flat,
+                         "the silent 4 MB section cut is back")

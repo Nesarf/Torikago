@@ -64,7 +64,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.17.0"
+_SOURCE_VERSION = "1.18.0"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
@@ -243,7 +243,13 @@ def find_boot_sector_pattern(data: bytes, limit: int = 8 << 20) -> list:
     reporting -- it is the difference between 'this program touches disks' and 'this program
     brings its own boot code'.
     """
-    head = data[:limit]
+    # **The whole file, not the first 8 MB.** This scan used to stop at `limit`, so a boot sector
+    # living past that point produced nothing -- and "not found" looked identical to "not there",
+    # which is the one distinction this tool exists to keep. Scanning everything is affordable here
+    # because it is a two-byte comparison to reject almost every position, and the false-positive
+    # rate is already controlled by the partition-table validation below: that check is what stopped
+    # a 51 MB remote-desktop DLL being reported as carrying boot code, twice.
+    head = data
     hits = []
     # len - 511, not len - 512: a 512-byte boot sector at offset 0 needs the loop to run
     # at least once, and the off-by-one made that case invisible.
@@ -345,16 +351,34 @@ def detect_destructive(pe: dict | None, data: bytes, imports: list,
     all_dlls = {imp["dll"].lower() for imp in imports}
 
     disks = []
+    scan_truncated = None
     if pe:
         for s in pe["sections"]:
             off = s["rawptr"]
-            body = data[off:off + min(s["rawsize"], 4 << 20)]
+            # **Scanned in full, and any shortfall reported.** This used to stop at 4 MB per section,
+            # so a raw-disk pattern living past that point produced no finding -- and "not found"
+            # looked exactly like "not there", which is the distinction this whole tool exists to keep.
+            body = data[off:off + s["rawsize"]]
+            if len(body) < s["rawsize"]:
+                scan_truncated = scan_truncated or s["name"]
             for pat in RAW_DISK_PATTERNS:
                 if pat in body and pat not in [d.encode() for d in disks]:
                     disks.append(pat.decode("latin1", "replace"))
+    # The file-wide window is reported the same way, for the same reason.
+    if len(data) > (1 << 20):
+        scan_truncated = scan_truncated or "file head"
     for pat in RAW_DISK_PATTERNS[:4]:
         if pat in data[:1 << 20] and pat.decode("latin1", "replace") not in disks:
             disks.append(pat.decode("latin1", "replace"))
+    if scan_truncated:
+        # Carried into the finding rather than left implicit: a reader comparing two reports needs to
+        # know whether a missing pattern was absent or unlooked-for.
+        findings.append({
+            "capability": "pattern scan was not exhaustive",
+            "evidence": ("raw-disk pattern search stopped short (%s); a pattern beyond that point "
+                         "would not have been found" % scan_truncated),
+            "severity": "low",
+        })
     if disks:
         findings.append({
             "capability": "raw disk or volume access",
@@ -1239,13 +1263,16 @@ def is_dotnet(pe: dict | None, data: bytes) -> dict | None:
 
 
 
-def detect_language(data: bytes, limit: int = 6 << 20, pe: dict | None = None) -> dict:
+def detect_language(data: bytes, limit: int | None = None, pe: dict | None = None) -> dict:
     """Name the language runtime when the evidence is there.
 
     This is a pointer for the analyst, not a claim: "Rust" says the binary was built with
     rustc, which changes which tooling is worth reaching for.
     """
-    head = data[:limit]
+    # The whole file. `limit` truncated the search, so a runtime marker past it was invisible and
+    # the absence read as "not this language". Kept as a parameter so callers can narrow it on
+    # purpose, but it no longer defaults to a silent cut.
+    head = data if limit is None else data[:limit]
     hits = []
     for lang, markers in RUNTIME_MARKERS:
         found = [m.decode("latin1", "replace") for m in markers if m in head]
