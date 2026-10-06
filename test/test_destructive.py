@@ -95,9 +95,20 @@ def make_lookalike(*, filler=b"\x8d\x8d\x00\xa0\x00\x00", slot=0) -> bytes:
     return bytes(m)
 
 
+def _boot_hits_fwd(data):
+    """Hits from the boot-sector scan, whichever shape the API returns.
+
+    The function returns a record now -- `hits` plus whether the scan covered the whole file -- so
+    that truncation is reported rather than silent. These tests care about the hits, and they ask for
+    the whole file because they are about detection rather than about the coverage default.
+    """
+    out = tri.find_boot_sector_pattern(data, limit=None)
+    return out["hits"] if isinstance(out, dict) else out
+
+
 class TestBootSectorDetection(unittest.TestCase):
     def test_a_real_mbr_is_detected(self):
-        hits = tri.find_boot_sector_pattern(make_mbr())
+        hits = _boot_hits_fwd(make_mbr())
         self.assertTrue(hits, "a structurally valid MBR must be detected")
         self.assertEqual(hits[0]["offset"], 0)
         self.assertEqual(hits[0]["partitions"][0]["type"], "0x7")
@@ -115,15 +126,15 @@ class TestBootSectorDetection(unittest.TestCase):
         }
         for label, mbr in cases.items():
             with self.subTest(label):
-                self.assertTrue(tri.find_boot_sector_pattern(mbr),
+                self.assertTrue(_boot_hits_fwd(mbr),
                                 "not detected: %s" % label)
 
     def test_rejects_an_unknown_partition_type(self):
-        self.assertEqual(tri.find_boot_sector_pattern(make_mbr(ptype=0x24)), [])
+        self.assertEqual(_boot_hits_fwd(make_mbr(ptype=0x24)), [])
 
     def test_rejects_a_0xff_sentinel_field(self):
         self.assertEqual(
-            tri.find_boot_sector_pattern(make_mbr(start_chs=(0xFF, 0x02, 0x00))), [],
+            _boot_hits_fwd(make_mbr(start_chs=(0xFF, 0x02, 0x00))), [],
             "0xFF is the field's unused marker")
 
     def test_rejects_absurd_geometry_from_compressed_data(self):
@@ -135,19 +146,19 @@ class TestBootSectorDetection(unittest.TestCase):
         noise[451:454] = bytes([0xFE, 0xFF, 0xFF])
         struct.pack_into("<II", noise, 458, 1_761_936_277, 2_951_039_675)
         noise[510:512] = b"\x55\xaa"
-        self.assertEqual(tri.find_boot_sector_pattern(bytes(noise)), [])
+        self.assertEqual(_boot_hits_fwd(bytes(noise)), [])
 
     def test_555a_alone_is_not_a_boot_sector(self):
         blob = bytearray(512)
         blob[510:512] = b"\x55\xaa"
-        self.assertEqual(tri.find_boot_sector_pattern(bytes(blob)), [])
+        self.assertEqual(_boot_hits_fwd(bytes(blob)), [])
 
 
     def test_a_lookalike_window_is_not_an_embedded_boot_sector(self):
         """The false positive, reproduced in shape and portable. One well-formed slot surrounded
         by slots that are neither partitions nor empty is what ordinary code looks like when it
         happens to satisfy the signature check -- it is not a partition table."""
-        self.assertEqual(tri.find_boot_sector_pattern(make_lookalike()), [])
+        self.assertEqual(_boot_hits_fwd(make_lookalike()), [])
 
     def test_the_lookalike_fires_with_a_permissive_rule(self):
         """Guards the guard: if this ever stops being a hit under the old shape, the test above
@@ -161,7 +172,7 @@ class TestBootSectorDetection(unittest.TestCase):
     def test_a_real_boot_sector_with_empty_slots_still_fires(self):
         """The other direction. A disk with one partition has three zeroed slots, so requiring
         every non-empty slot to be well formed must not reject it."""
-        self.assertTrue(tri.find_boot_sector_pattern(make_mbr() + bytes(1024)))
+        self.assertTrue(_boot_hits_fwd(make_mbr() + bytes(1024)))
 
     def test_a_boot_sector_with_several_partitions_still_fires(self):
         """Two real entries and two empty slots must also pass."""
@@ -170,7 +181,7 @@ class TestBootSectorDetection(unittest.TestCase):
         struct.pack_into("<II", second, 8, 2_000_000, 500_000)
         second[4] = 0x83
         m[462:478] = second
-        self.assertTrue(tri.find_boot_sector_pattern(bytes(m) + bytes(1024)))
+        self.assertTrue(_boot_hits_fwd(bytes(m) + bytes(1024)))
 
 class TestDestructiveCapability(unittest.TestCase):
     def _report(self, payload: bytes, imports=None):

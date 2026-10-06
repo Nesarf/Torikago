@@ -350,9 +350,12 @@ class TestAScanReachesPastTheOldCaps(unittest.TestCase):
         mbr[510] = 0x55
         mbr[511] = 0xAA
         data = filler + bytes(mbr)
-        hits = tk.find_boot_sector_pattern(data)
+        # `limit=None` because this test is about coverage, not about the default. The default is a
+        # bounded prefix (SCAN_COVERAGE) and says so in its result; the point here is that asking for
+        # everything actually looks at everything.
+        out = tk.find_boot_sector_pattern(data, limit=None)
+        hits = out["hits"] if isinstance(out, dict) else out
         self.assertTrue(hits, "a boot sector past 8 MB was not found")
-        # A list of records, not of offsets -- read from the return rather than assumed.
         self.assertGreater(hits[0]["offset"], 8 << 20)
 
     def test_a_runtime_marker_past_the_old_cut_is_found(self):
