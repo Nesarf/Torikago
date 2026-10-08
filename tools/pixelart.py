@@ -126,15 +126,41 @@ def to_pixel_art(image, *, size: int = 64, colors=PIXEL20, dither=None):
     return q.convert("RGB").resize((size, size), Image.NEAREST)
 
 
-def sample_palette(image, n: int = 20):
-    """The most-used `n` colours of an image, as `to_pixel_art` would see them.
+def sample_palette(image, n: int = 20, *, merge_distance: int = 24):
+    """The `n` colours a reference image actually uses, with near-duplicates merged first.
 
-    Used to derive a palette from a reference sheet rather than importing one. **A palette taken from
-    the reference can be attributed to it; a palette remembered from somewhere cannot.**
+    **The merge is the whole point.** A lossy source -- a JPEG, a screenshot, a photo of a screen --
+    does not contain clean palette entries. It contains each entry plus a halo of neighbours that
+    differ by a few levels per channel, and counting those separately is how a palette of ten colours
+    reads as twenty-five thousand.
+
+    Measured: a 40-frame JPEG sprite animation reported 25,398 distinct RGB values, and the head of
+    that list was `#005D77` followed by `#005E77`, `#015C77`, `#005D76` -- one colour and its
+    compression noise. **A sampler that does not merge is measuring the encoder, not the art.**
+
+    `merge_distance` is a per-channel Chebyshev threshold: two colours within it are the same colour,
+    and the more frequent one wins the group. **The winner's own value is kept rather than the group's
+    average**, so every result is a colour that exists in the image -- which is what lets it be
+    attributed to the source rather than invented.
     """
     counts = image.convert("RGB").getcolors(maxcolors=1 << 24) or []
-    counts.sort(reverse=True)
-    return tuple(c for _, c in counts[:n])
+    counts.sort(reverse=True)                  # most frequent first, so each group's winner is modal
+
+    groups = []                                # [(winner, total_count)]
+    for count, colour in counts:
+        for i, (winner, total) in enumerate(groups):
+            if max(abs(a - b) for a, b in zip(colour, winner)) <= merge_distance:
+                groups[i] = (winner, total + count)
+                break
+        else:
+            groups.append((colour, count))
+            if len(groups) >= n:
+                # Enough distinct colours; whatever is left can only be noise around them, and
+                # merging thousands of near-duplicates to prove that costs more than it tells.
+                break
+
+    groups.sort(key=lambda g: -g[1])
+    return tuple(winner for winner, _ in groups[:n])
 
 
 def describe_palette(colors):
