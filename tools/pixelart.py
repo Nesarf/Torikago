@@ -87,8 +87,26 @@ CHARACTER_ACCENTS = {
     "lilith": ((0xFF, 0xFF, 0xFF), (0xD2, 0xD2, 0xD2), (0xED, 0x1C, 0x24),
                (0xF3, 0x8D, 0xA9), (0x60, 0x00, 0x18), (0x00, 0x00, 0x00)),
     # 阿玛丽莉丝：银紫髪 · 紫眼 · 修女袍（白与浅灰）· 束带与手套（黑）· 主题色紫水晶
-    "amaryllis": ((0xFF, 0xFF, 0xFF), (0xD2, 0xD2, 0xD2), (0xAA, 0x38, 0xB9),
-                  (0xE0, 0x9F, 0xF9), (0x99, 0xB1, 0xFB), (0x00, 0x00, 0x00)),
+    # **三个中性色会把平均值拖下去，所以这一组里中性只留一个。**
+    # 原先是 白 + 浅灰 + 黑 三个 S=0 的色，于是平均饱和只有 0.242 ——
+    # 而莉莉丝那组恰好含 `#ED1C24`（S=0.88），平均 0.384。
+    # **同级的两个角色，辨识强度差了一倍**，而那是我的选色失误，不是设定如此。
+    #
+# **补记：这条修过三次，前两次各自修坏了一个属性。**
+#
+#   版本                      最小感知距离   平均饱和
+#   原始（含 白/浅灰/黑 三中性）  0.288        0.242   ← 饱和不够，32×32 下读不出
+#   第一次修（直接换饱和色）        **0.066**    0.469   ← 分离度被毁（近白 vs 白、粉 vs 粉）
+#   第二次修（在候选池上搜索）      **0.372**    **0.574**  ← 两个属性同时改善
+#
+# **教训不是"要小心"，是"这类选择该搜索而不是手选"。**
+# 第一次修时我以为"更饱和 = 更好"，而实际上 32×32 下起决定作用的是**最接近的那一对**
+# ——最接近的一对就是会被认错的一对。手选看不到那一对，搜索能看到。
+#
+# 第二次修的做法：候选池 = 设定图采样 → 提饱和 ×2.2，再并入一组紫系扩样；
+# 在池上枚举 6 色组合，**以"到莉莉丝集的最小距离"为排序目标**，饱和只作下限筛。
+    "amaryllis": ((0xA5, 0x7B, 0xDB), (0x8E, 0x6F, 0xD4), (0x7B, 0x4F, 0xCB),
+                  (0x86, 0x45, 0xD6), (0x63, 0x4A, 0xA8), (0x53, 0x2E, 0x8F)),
 }
 
 
@@ -119,6 +137,7 @@ def to_pixel_art(image, *, size: int = 64, colors=PIXEL20, dither=None):
     from PIL import Image
     if dither is None:
         dither = Image.FLOYDSTEINBERG
+    from PIL import Image
     src = image.convert("RGB")
     # Quantise at the source resolution so the dither has pixels to work with, then take the result
     # down with NEAREST -- any smooth resampling would blend the palette back into gradients.
@@ -143,7 +162,20 @@ def sample_palette(image, n: int = 20, *, merge_distance: int = 24):
     average**, so every result is a colour that exists in the image -- which is what lets it be
     attributed to the source rather than invented.
     """
-    counts = image.convert("RGB").getcolors(maxcolors=1 << 24) or []
+    from PIL import Image
+    src = image.convert("RGB")
+    # **A big image must not be able to fail this.** `getcolors` builds a dict of every distinct colour,
+    # and on a large crop that raised MemoryError outright -- an image is not a malformed input, so
+    # failing on one is a defect here rather than a fact about the caller.
+    #
+    # Above the threshold the image is strided down first. That is sound for palette extraction
+    # because a colour's *share* is what the result reports, and taking every nth pixel of a large
+    # image estimates every share closely -- far more closely than the merge threshold cares about.
+    PIXEL_BUDGET = 1 << 18
+    if src.width * src.height > PIXEL_BUDGET:
+        step = int((src.width * src.height / PIXEL_BUDGET) ** 0.5) + 1
+        src = src.resize((max(1, src.width // step), max(1, src.height // step)), Image.NEAREST)
+    counts = src.getcolors(maxcolors=1 << 24) or []
     counts.sort(reverse=True)                  # most frequent first, so each group's winner is modal
 
     groups = []                                # [(winner, total_count)]
@@ -423,3 +455,39 @@ PALETTE_AMARYLLIS = (
     (0xB9,0xB2,0xBF), (0x66,0x5B,0x7F), (0x74,0x5A,0x65), (0xAC,0x99,0xB6),
     (0xBD,0x7C,0x9B), (0xBC,0x97,0x76), (0x0A,0x08,0x0F), (0x42,0x3A,0x5A),
 )
+
+# --------------------------------------------------------------------------- #
+# 设定图 → 像素色：色相可用，饱和不够
+# --------------------------------------------------------------------------- #
+#
+# **实测（2026-10-08，两张设定图各取 16 色）：**
+#
+#   角色        采样板平均 S    辨识板平均 S    PIXEL20 平均 S
+#   lilith      0.190          0.384          0.478
+#   amaryllis   0.220          0.242          0.478
+#
+# **设定图是粉彩调**（S 0.19–0.22），而 32×32 的像素图要 S ≈ 0.4–0.5 才读得出 ——
+# 因为在那么小的画布上，颜色是唯一的辨识手段，而低饱和的色会糊成一团灰。
+#
+# **所以从设定图只能取「色相」，像素色要另提饱和。** `saturate()` 做那一步。
+
+def saturate(colour, factor: float = 2.2, *, floor_value: float = 0.55):
+    """Raise a colour's saturation, keeping its hue.
+
+    **Why not just use the reference's colour.** A painted reference is pastel; a 32x32 sprite is not
+    affordance for pastel, because at that size colour is the only thing carrying identity and low
+    saturation collapses to grey. Measured on two character sheets: mean saturation 0.19 and 0.22,
+    against 0.48 for the shared palette the sprites are drawn from.
+
+    Hue is preserved exactly -- that is the part the reference is authoritative about. Saturation is
+    scaled, and very light colours are also pulled down a little so they do not blow out to white when
+    their saturation rises, which is what makes a highlight stay a highlight.
+    """
+    import colorsys
+    r, g, b = [c / 255 for c in colour[:3]]
+    h, s, v = colorsys.rgb_to_hsv(r, g, b)
+    s = min(1.0, s * factor)
+    if v > 0.5:
+        v = min(1.0, floor_value + v * (1.0 - floor_value))
+    r, g, b = colorsys.hsv_to_rgb(h, s, v)
+    return (round(r * 255), round(g * 255), round(b * 255))

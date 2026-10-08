@@ -89,9 +89,31 @@ class TestSamplingMergesCompressionNoise(unittest.TestCase):
             self.assertIn(tuple(c), cols, "%r was invented" % (c,))
 
     def test_the_winner_is_a_colour_that_exists_not_an_average(self):
-        """Averaging would produce a value the image never contains, which cannot be attributed to it."""
+        """Averaging would produce a value the image never contains, and such a value cannot be
+        attributed to the source -- which is the whole reason a palette is taken from one.
+        """
         im, base = self._noisy()
+        present = {col for _, col in (im.getcolors(1 << 24) or [])}
+        self.assertTrue(present, "the fixture has no colours")
         for c in pa.sample_palette(im, 4):
-            self.assertIn(tuple(c), [tuple(p) for p in (im.getcolors(1 << 24) or []) and
-                                     [col for _, col in im.getcolors(1 << 24)]] or [],
+            self.assertIn(tuple(c), present,
                           "%r is not a colour present in the image" % (c,))
+
+    def test_a_large_image_does_not_exhaust_memory(self):
+        """`getcolors` builds a dict of every distinct colour, and on a large crop that raised
+        MemoryError outright. **An image is not a malformed input**, so failing on one is a defect
+        here rather than a fact about the caller.
+
+        Kept deliberately small: an earlier version used 600x600 and, on a machine where memory is
+        tight, left enough pressure behind to make **unrelated tests elsewhere in the suite** fail on
+        file reads. A regression test that destabilises its neighbours is worth less than it costs.
+        The budget it exercises is 2**18 pixels, so 384x384 is already comfortably past it.
+        """
+        from PIL import Image
+        im = Image.new("RGB", (384, 384))
+        px = im.load()
+        for y in range(384):
+            for x in range(384):
+                px[x, y] = ((x * 3 + y) % 256, (y * 5 + x) % 256, (x ^ y) % 256)
+        out = pa.sample_palette(im, 16)          # must not raise
+        self.assertTrue(1 <= len(out) <= 16)
