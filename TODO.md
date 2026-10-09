@@ -100,6 +100,44 @@
 **适用面**：图标 · 启动画面 · 帮助插图 · 报告里的图形 · 任何 UI。**没有例外**（"就这一张矢量"也不行——
 例外会让风格分家，而分家之后没人记得当初的界线在哪）。
 
+# 零之四、⚠ **测试套件不稳定：依赖真 ClamAV 的那几条**（2026-10-10 记）
+
+**同一份代码，连跑两次结果不同：**
+
+```
+run 1   375 passed, 19 skipped            40.39s
+run 2     5 failed, 367 passed, 22 skipped  9.29s
+```
+
+**而 `test/test_handoff.py` 单独跑 13 个全过。** 所以不是功能坏了，是**测试隔离**。
+
+## 根因
+
+`find_clamav()`（`torikago.py:1896`）会**发现本机真装的 ClamAV**
+（`C:\Program Files\ClamAV\clamscan.exe`），而 `test_feed.py` 造的是**假 clamscan 脚本**。
+两者混在一起时，真 clamscan 在无控制台环境里 **`[WinError 6] 句柄无效`**：
+
+```
+{'ok': False, 'available': True, 'executed': False,
+ 'reason': 'could not run clamscan: [WinError 6] 句柄无效。'}
+```
+
+**于是 5 条失败：2 条在 `test_feed.py::TestClamAv`（`KeyError: 'infected'`），
+3 条在 `test_handoff.py`（`KeyError: 'note'` / `IndexError`）** ——
+它们都读扫描结果，而扫描没跑起来。
+
+**40 秒那一次是等到了；9 秒那一次是没等到。** 时间差就是它的签名。
+
+## 为什么这条要紧
+
+**清单写着「测试 364 · 工作树干净」，而实测会红。** 一个**随机红**的套件会让
+「CI 必须绿」这条发布纪律失去意义 —— **因为你分不清「这次红」是新缺陷还是抖动。**
+
+**修法方向**（未实施）：让需要扫描的测试**显式注入扫描器**并断言用的是哪一个，
+而不是让 `find_clamav()` 去发现本机；真 clamscan 的路径走一条**独立、带显式跳过标记**的测试。
+
+---
+
 # 一、第一档：正确性与管道
 
 | # | 状态 | 项 | 为什么要紧 |
