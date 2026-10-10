@@ -802,6 +802,97 @@ class TestIndicators(unittest.TestCase):
 
 class TestReportAndCli(unittest.TestCase):
 
+    def test_yara_draft_is_measured_against_a_corpus(self):
+        """**The regression this exists for.** A draft used to pick the first eight printable
+        strings and never ask how often they occur in files that are not the sample. Measured
+        against 100 system PEs, a rule from notepad.exe picked seven API-set import names present in
+        33-67% of them and matched 0 of 100 -- a rule that can neither detect nor exclude, wearing
+        the shape of a rule.
+
+        The fix measures candidate strings against a benign corpus and writes the rule's own
+        observed hit count into its meta block. So the assertion is not "the draft is good" but
+        "the draft says what it was measured against", which is checkable.
+        """
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            benign = root / "benign"
+            benign.mkdir()
+            # 12 ordinary files, three of which contain a string the sample also has
+            for k in range(12):
+                blob = b"MZ" + b"\x00" * 200 + b"kernel32.dll"
+                if k < 3:
+                    blob += b"tokenSHARED_MARKER.dll"
+                (benign / ("b%02d.dll" % k)).write_bytes(blob)
+            r = {"hashes": {"sha256": "ab" * 32},
+                 "strings": {"interesting": ["tokenSHARED_MARKER.dll",
+                                             "http://RARE_UNIQUE_TOKEN.invalid/gate"]}}
+            draft = tri.draft_yara(r, corpus=[str(x) for x in sorted(benign.iterdir())])
+
+        # the measurement is stated, not implied
+        self.assertIn("corpus_check", draft)
+        self.assertIn("of 12 ordinary PE files", draft)
+        # the same string also appears in 3 of 12 ordinary files (25%), so it is at the boundary
+        # and must not be the thing carrying the rule
+        self.assertIn("RARE_UNIQUE_TOKEN", draft)
+        # and the note that was already right stays
+        self.assertIn("UNREVIEWED", draft)
+        self.assertIn("uint16(0) == 0x5A4D", draft)
+
+    def test_a_draft_without_a_corpus_refuses_rather_than_guessing(self):
+        """Refusing is the honest outcome when the prevalence of every candidate is unknown.
+
+        The alternative -- emitting a rule anyway -- is what produced the 0-of-100 rule: it looked
+        finished. The text has to point at what is still usable, which is the hashes.
+
+        The report is built by hand rather than through `build_report`, because `draft_yara` reads
+        only `report["strings"]` and `report["hashes"]` and a hand-built one says exactly what the
+        test is about. Going through `build_report` meant the fixture's strings had to survive
+        `extract_strings`'s keyword filter, and the first version of these tests did not -- they
+        exercised the "no candidates at all" path while claiming to test the corpus path.
+        """
+        r = {"hashes": {"sha256": "ab" * 32},
+             "strings": {"interesting": ["http://evil-c2.top/gate"]}}
+        draft = tri.draft_yara(r, corpus=[])
+        self.assertNotIn("rule torikago_draft", draft)
+        self.assertIn("Not enough evidence", draft)
+        self.assertIn("report.json", draft)
+
+    def test_a_draft_whose_candidates_are_all_common_refuses(self):
+        """When every candidate is ordinary there is no rule to be had, and saying so beats
+        emitting one that describes the corpus. This is the notepad.exe case, reproduced exactly:
+        the strings were import names present in a third of all system PEs."""
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            benign = root / "benign"
+            benign.mkdir()
+            for k in range(10):
+                (benign / ("b%02d.dll" % k)).write_bytes(
+                    b"MZ" + b"api-ms-win-core-heap-l1-1-0.dll")
+            r = {"hashes": {"sha256": "cd" * 32},
+                 "strings": {"interesting": ["api-ms-win-core-heap-l1-1-0.dll"]}}
+            draft = tri.draft_yara(r, corpus=[str(x) for x in sorted(benign.iterdir())])
+        self.assertNotIn("rule torikago_draft", draft)
+        self.assertIn("Not enough evidence", draft)
+        self.assertIn("rarest is", draft)
+
+    def test_only_strings_absent_from_ordinary_files_carry_the_rule(self):
+        """The condition is `all of them`, so a string present in most ordinary files is pure
+        false-positive risk and must be dropped even though it looks distinctive."""
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            benign = root / "benign"
+            benign.mkdir()
+            for k in range(20):
+                (benign / ("b%02d.dll" % k)).write_bytes(
+                    b"MZ" + b"UBIQUITOUS_TOKEN_import.dll")
+            r = {"hashes": {"sha256": "ef" * 32},
+                 "strings": {"interesting": ["UBIQUITOUS_TOKEN_import.dll",
+                                             "http://RARE_SPECIFIC_TOKEN.invalid/x"]}}
+            draft = tri.draft_yara(r, corpus=[str(x) for x in sorted(benign.iterdir())])
+
+        self.assertIn("RARE_SPECIFIC_TOKEN", draft)
+        self.assertNotIn("UBIQUITOUS_TOKEN", draft)
+
     def test_yara_draft_is_labelled_unreviewed(self):
 
         with tempfile.TemporaryDirectory() as t:

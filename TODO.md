@@ -138,7 +138,7 @@ run 2     5 failed, 367 passed, 22 skipped  9.29s
 
 ---
 
-# 零之五、⚠ **`draft_yara` 输出一条 0/100 的规则**（2026-10-10 记，未修）
+# 零之五、**`draft_yara` 输出一条 0/100 的规则**（2026-10-10 记，**已修**）
 
 **评估 24 个外部工具时把 `draft_yara` 的产物拿去量，量出的不是「要不要集成」，是一个缺陷。**
 完整评估见 `EXTERNAL_TOOLS.md`。
@@ -166,7 +166,38 @@ $s1..$s7  api-ms-win-*.dll （7 条）              in  33..67 / 100 ← 通用
 
 **根因与 `N-5`（`should_stage` 的判据没有独立量度）同族。**
 
-## 修法（**不需要任何外部工具**）
+## 已实施的修法（**没有引入任何依赖**）
+
+`draft_yara(report, max_strings=8, *, corpus=None)`：
+
+| 步骤 | 实现 |
+|---|---|
+| 1 量出现率 | `_yara_hit()` —— **`ascii wide` 意味着两种编码都算命中**，只搜 ASCII 会把通用串误判为罕见 |
+| 2 按选择性挑 | 剔除 `share > YARA_COMMON_SHARE (0.25)` 的；**按罕见度排序**，不按原顺序取前 8 |
+| 3 条件 | 仍是 `all of them`，但**成员全部是罕见的**，所以判别力不再由碰巧最罕见的一条决定 |
+| 4 **把命中率写进规则** | `corpus_check = "matched 0 of 120 ordinary PE files (measured)"` |
+
+**而两条拒绝路径都实现并测了**：无语料可读 → 拒绝；**全部候选都常见 → 拒绝并报出最罕见那条的占比**。
+**不猜，也不发出一个「看起来像规则」的东西。**
+
+**CLI**：`--yara-corpus DIR`（可重复）；**传空串是显式要求「没有语料」**，不是静默回落到默认。
+
+### ★ 效果对比（同一个 `notepad.exe`）
+
+```
+修前:  8 条全选前 8 个 → 7 条是 33–67% 的通用 API-set 名 → 命中 0 / 100
+       note = "UNREVIEWED: verify against a corpus before use"          ← 声明
+
+修后:  只取 120 个良性 PE 里的罕见串（唯一 URL · 唯一属性名 · 罕见 API-set）
+       corpus_check = "matched 0 of 120 ordinary PE files (measured)"   ← 证据
+```
+
+**测试**：新增 4 项（`tests/test_torikago.py`）—— 量过并且度量写进 meta · 无语料时拒绝 ·
+候选全常见时拒绝 · 通用串被剔除。**378 passed。**
+
+### 而集成侧仍然**只要语法检查，不要引擎**（见下）
+
+## 原修法草案（保留作为记录）
 
 | 步骤 | 做什么 |
 |---|---|
