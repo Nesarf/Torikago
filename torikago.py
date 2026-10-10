@@ -48,6 +48,55 @@ try:
 except ImportError:                                # pragma: no cover - unpack.py ships with us
     unpack_mod = None
 
+
+# `yara-python` is optional, and there is no fallback because there is nothing to fall back to: a
+# syntax check either ran or it did not, and claiming it ran when it did not is the failure this
+# file keeps having to guard against. The base install stays dependency-free on purpose -- this is
+# meant to run on a machine you do not control -- so it is an extra:
+#     pip install torikago[yara]
+#
+# **compile() only. The engine is never asked to match anything.** Compiling parses rule text;
+# matching would run a pattern engine over the sample, and "Never runs the target" is a red line
+# with a test behind it (`test/test_never_executes.py`). A syntax check is worth having because
+# `--handoff` promises a rule somebody else can load, and until now a draft that did not parse
+# would have been discovered by that somebody else.
+try:
+    import yara as _yara
+except ImportError:                                # reported, never hidden
+    _yara = None
+
+NEEDS_YARA = (
+    "yara-python is not installed, so the drafted rule's syntax was not checked. The draft is\n"
+    "still produced and still marked UNREVIEWED; what is missing is the parse, not the rule.\n"
+    "  install it:  python -m pip install torikago[yara]"
+)
+
+
+def check_yara_syntax(draft: str) -> dict:
+    """Parse the draft with yara. Never matches it against anything.
+
+    `checked` False means the check did not happen, and `reason` says why. Absence is reported
+    rather than worked around, which is the same rule this file follows for ClamAV and MISP.
+    """
+    # The "is there a rule at all" test comes first, deliberately: a document with no rule in it
+    # needs no parser, so that answer must not depend on whether one is installed. Checking for the
+    # module first made this branch unreachable on a machine without the extra.
+    if draft.lstrip().startswith("//"):
+        # The two refusal texts are comments by design: there is no rule in them to parse, and
+        # reporting "syntax ok" for a document containing no rule would be a false reassurance.
+        return {"checked": False, "ok": None, "detail": "",
+                "reason": "no rule was drafted, so there is no syntax to check"}
+    if _yara is None:
+        return {"checked": False, "ok": None, "detail": "", "reason": NEEDS_YARA}
+    try:
+        compiled = _yara.compile(source=draft)
+    except Exception as exc:                       # yara raises its own error types
+        return {"checked": True, "ok": False,
+                "detail": "%s: %s" % (type(exc).__name__, exc), "reason": None}
+    return {"checked": True, "ok": True,
+            "detail": "parsed by yara-python %s" % getattr(_yara, "__version__", "?"),
+            "reason": None}
+
 def _version() -> str:
     """The version of the installed distribution, or of this file.
 
@@ -2826,6 +2875,12 @@ def build_report(path: Path, out_dir: Path | None, *, max_bytes: int = DEFAULT_M
     report["unpack_plan"] = plan_unpacking(report)
     report["yara_draft"] = draft_yara(report,
                                       corpus=_yara_corpus_from_args(yara_corpus))
+    report["yara_syntax"] = check_yara_syntax(report["yara_draft"])
+    if report["yara_syntax"]["checked"] and not report["yara_syntax"]["ok"]:
+        # Saying it out loud is the whole point: the alternative is the person who receives
+        # the rule discovering it.
+        report.setdefault("notes", []).append(
+            "the drafted YARA rule does not parse (%s)" % report["yara_syntax"]["detail"])
     return report
 
 

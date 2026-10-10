@@ -893,6 +893,60 @@ class TestReportAndCli(unittest.TestCase):
         self.assertIn("RARE_SPECIFIC_TOKEN", draft)
         self.assertNotIn("UBIQUITOUS_TOKEN", draft)
 
+    def test_yara_syntax_absences_are_reported_not_hidden(self):
+        """The check is optional, and the one thing it must never do is claim to have run.
+
+        Exercised on a machine without yara-python by calling the function with the module's hook
+        cleared, so this test says the same thing whether or not the extra is installed.
+        """
+        saved = tri._yara
+        try:
+            tri._yara = None
+            r = tri.check_yara_syntax("rule r { condition: true }")
+        finally:
+            tri._yara = saved
+        self.assertFalse(r["checked"])
+        self.assertIsNone(r["ok"])
+        self.assertIn("not installed", r["reason"])
+        self.assertIn("pip install", r["reason"])
+
+    def test_yara_syntax_does_not_claim_a_rule_where_there_is_none(self):
+        """The refusal texts are comments by design. Reporting "syntax ok" for a document with no
+        rule in it would be the same class of false reassurance as an unchecked draft claiming to
+        be checked."""
+        r = tri.check_yara_syntax("// Not enough evidence to draft a rule." + chr(10)
+                                  + "// hashes instead" + chr(10))
+        self.assertFalse(r["checked"])
+        self.assertIn("no rule was drafted", r["reason"])
+
+    def test_yara_syntax_check_runs_when_the_extra_is_installed(self):
+        """Only meaningful with yara-python present, so it asserts the branch it can and skips the
+        rest. The branch that decides `ok` by compiling is the point: a draft that does not parse
+        must come back ok=False with the parser's own message, not an exception."""
+        if tri._yara is None:
+            self.skipTest("yara-python not installed; the compile branch is covered by the extra")
+        good = 'rule r { strings: $s0 = "x" ascii wide condition: uint16(0) == 0x5A4D and $s0 }'
+        ok = tri.check_yara_syntax(good)
+        self.assertTrue(ok["checked"])
+        self.assertTrue(ok["ok"])
+        bad = "rule r { strings: $s0 = condition: }"
+        broken = tri.check_yara_syntax(bad)
+        self.assertTrue(broken["checked"])
+        self.assertFalse(broken["ok"])
+        self.assertIn("SyntaxError", broken["detail"])
+
+    def test_a_report_carries_the_syntax_verdict(self):
+        """Whatever the verdict, the report says which one it is, so a reader is never left to
+        assume a draft parsed."""
+        with tempfile.TemporaryDirectory() as t:
+            p = Path(t) / "s.exe"
+            p.write_bytes(build_pe() + b"http://evil-c2.top/gate")
+            r = tri.build_report(p, None, yara_corpus=[])
+        self.assertIn("yara_syntax", r)
+        self.assertIn("checked", r["yara_syntax"])
+        if not r["yara_syntax"]["checked"]:
+            self.assertTrue(r["yara_syntax"]["reason"])
+
     def test_yara_draft_is_labelled_unreviewed(self):
 
         with tempfile.TemporaryDirectory() as t:

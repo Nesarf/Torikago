@@ -30,6 +30,11 @@ pyinstaller = ["nanodesu>=1.2,<2"]
 # it will happily set the encrypted bit and write plaintext. So this is an extra rather than
 # something worked around, and its absence is a reported failure rather than a silent downgrade.
 vault = ["pyzipper>=0.3.6"]
+# Optional, and the absence is reported rather than hidden. `check_yara_syntax` compiles the
+# drafted rule to catch a syntax error before `--handoff` gives it to someone else. It never
+# matches the rule against anything -- compiling parses text, matching would run a pattern
+# engine over the sample, and that is the "Never runs the target" red line.
+yara = ["yara-python>=4.3"]
 
 [project.scripts]
 torikago = "torikago:main"

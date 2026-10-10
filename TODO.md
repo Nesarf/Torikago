@@ -195,6 +195,31 @@ $s1..$s7  api-ms-win-*.dll （7 条）              in  33..67 / 100 ← 通用
 **测试**：新增 4 项（`tests/test_torikago.py`）—— 量过并且度量写进 meta · 无语料时拒绝 ·
 候选全常见时拒绝 · 通用串被剔除。**378 passed。**
 
+### 而集成侧：**只要语法检查，不要引擎 —— 已做**
+
+新增 `check_yara_syntax(draft)`，接在 `draft_yara` 之后，判决写进 `report["yara_syntax"]`：
+
+| 做 | 不做 |
+|---|---|
+| 可选 extra：`yara = ["yara-python>=4.3"]`（已加进 `pyproject.toml`） | **基础安装仍然零依赖** |
+| **`yara.compile()` 只编译，绝不 `match()`** | **绝不把规则跑在样本上**（`test_never_executes.py` 是红线） |
+| 没装时 `checked=False` + `reason` 明说未校验 | 不静默降级、不假装校验过了 |
+| 语法坏时**加一条 note** 说它不 parse | 不让收到规则的人自己发现 |
+
+**三个分支都验证过**（基础解释器缺 yara，临时 venv 装了 yara-python 4.5.4）：
+
+```
+基础解释器 (无 yara):   4 passed, 1 skipped     ← 编译分支按设计跳过
+venv (yara 4.5.4):      5 passed                ← 编译分支通过
+  合规规则  -> checked=True  ok=True  "parsed by yara-python 4.5.4"
+  语法坏    -> checked=True  ok=False "SyntaxError: line 1: ..."
+  拒绝文本  -> checked=False "no rule was drafted, so there is no syntax to check"
+```
+
+**而「有没有规则」这条检查放在「装了没有」之前** —— 一个不含规则的文档不需要解析器，
+所以那个答案不该取决于装没装。**放反了会让这条分支在无 yara 的机器上不可达**（第一版就是这样，
+被测试抓到）。
+
 ### 而集成侧仍然**只要语法检查，不要引擎**（见下）
 
 ## 原修法草案（保留作为记录）

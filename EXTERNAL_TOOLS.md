@@ -118,6 +118,9 @@ $s7  api-ms-win-core-errorhandling-l1-1-0.dll   in  67 / 100    ← 通用
 | **`yara.compile()` 只编译，不 `match()`** —— 语法错是回归 | **绝不在样本上跑规则**（那是执行） |
 | 没装时**明确报告「未校验语法」**，不静默降级 | 不假装校验过了 |
 
+**已实施**（2026-10-10）：`check_yara_syntax()` + `pyproject.toml` 的 `yara` extra +
+`report["yara_syntax"]`。三个分支在「无 yara」与「有 yara-python 4.5.4」两种解释器上都验过。
+
 **而 `--handoff` 需要一条能过 YARA 的规则，所以「语法有效」是有价值的** ——
 现在完全没有校验。
 
