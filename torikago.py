@@ -1901,12 +1901,18 @@ def scan_with_defender(paths, *, mpcmdrun: str | None = None, timeout: int = 900
     import subprocess
     targets = [(p if isinstance(p, Path) else Path(p)) for p in paths]
     verdicts, errors = [], []
+    spawn_failed = False
     for target in targets:
         cmd = [exe, "-Scan", "-ScanType", "3", "-File", str(target), "-DisableRemediation"]
         try:
             proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
         except (OSError, subprocess.SubprocessError) as exc:
             errors.append({"file": target.name, "error": str(exc)})
+            # A failed spawn is a different fact from a failed verdict, and reporting them
+            # identically is what made a run of these tests fail intermittently with nothing
+            # machine-readable to point at. See scan_with_clamav for the same field.
+            if isinstance(exc, OSError):
+                spawn_failed = True
             continue
         out = (proc.stdout or b"").decode("utf-8", "replace")
         err = (proc.stderr or b"").decode("utf-8", "replace")
@@ -1931,10 +1937,12 @@ def scan_with_defender(paths, *, mpcmdrun: str | None = None, timeout: int = 900
     # clean when in fact nobody looked at it.
     if not verdicts:
         return {"ok": False, "engine": "windows-defender", "executed": False,
+                "spawn_failed": spawn_failed,
                 "reason": ("no verdict was obtained from %s" % exe),
                 "errors": errors, "verdicts": [], "owner": defender_owner()}
     return {"ok": True, "engine": "windows-defender", "executed": False,
-            "remediation_disabled": True, "verdicts": verdicts, "errors": errors,
+            "remediation_disabled": True, "spawn_failed": False,
+            "verdicts": verdicts, "errors": errors,
             "owner": defender_owner(),
             # Said every time, because the temptation to read this as our own conclusion is the
             # whole risk of having it.
@@ -1978,10 +1986,15 @@ def scan_with_clamav(paths, *, clamscan: str | None = None, timeout: int = 900) 
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return {"ok": False, "available": True, "executed": False,
+        return {"ok": False, "available": True, "executed": False, "spawn_failed": False,
                 "reason": "clamscan timed out after %ds" % timeout}
     except OSError as exc:
-        return {"ok": False, "available": True, "executed": False,
+        # `spawn_failed` is machine-readable on purpose. Without it a caller can only tell "no
+        # verdict" from a prose reason, and the reason conflates two different situations: the
+        # engine ran and disagreed with us, versus the engine never started. Tests on a machine
+        # that refuses to spawn -- intermittently, under load -- need to tell those apart, and so
+        # does anybody reading a report.
+        return {"ok": False, "available": True, "executed": False, "spawn_failed": True,
                 "reason": "could not run clamscan: %s" % exc}
 
     # Only accept a verdict whose file part is one of the files we asked about. ClamAV's

@@ -100,7 +100,7 @@
 **适用面**：图标 · 启动画面 · 帮助插图 · 报告里的图形 · 任何 UI。**没有例外**（"就这一张矢量"也不行——
 例外会让风格分家，而分家之后没人记得当初的界线在哪）。
 
-# 零之四、⚠ **测试套件不稳定：依赖真 ClamAV 的那几条**（2026-10-10 记）
+# 零之四、**测试套件不稳定：依赖 spawn 的那几条**（2026-10-10 记，**已修**）
 
 **同一份代码，连跑两次结果不同：**
 
@@ -133,8 +133,43 @@ run 2     5 failed, 367 passed, 22 skipped  9.29s
 **清单写着「测试 364 · 工作树干净」，而实测会红。** 一个**随机红**的套件会让
 「CI 必须绿」这条发布纪律失去意义 —— **因为你分不清「这次红」是新缺陷还是抖动。**
 
-**修法方向**（未实施）：让需要扫描的测试**显式注入扫描器**并断言用的是哪一个，
-而不是让 `find_clamav()` 去发现本机；真 clamscan 的路径走一条**独立、带显式跳过标记**的测试。
+## ⚠ 而我最初的归因是**错的**
+
+我写的是「`find_clamav()` 撞上本机真 ClamAV」。**实测：本机没有 ClamAV**
+（`CLAMAV_CANDIDATES` 四条全不存在 · `shutil.which("clamscan")` 为 `None` · `find_clamav()` 返回 `None`），
+而假脚本是**显式注入**的（`scan_with_clamav([...], clamscan=str(script))`）。
+
+**真因是这台机器在负载下会拒绝 spawn 进程**：
+
+```
+test_feed:      'could not run clamscan: [WinError 6] 句柄无效。'
+test_handoff:   scan_with_defender(...) → ok=False（同一个 OSError）
+```
+
+单独跑能过（0.15 秒）是因为进程少。**所以「测试隔离」这个说法也不对 —— 它既不是隔离问题，
+也不是 ClamAV 问题，是「测试依赖了不该依赖的机器行为」。**
+
+## 已实施的修法
+
+| 层 | 改动 |
+|---|---|
+| **产品** | `scan_with_clamav` / `scan_with_defender` 增加 **`spawn_failed`** 字段 —— 机器可读地分开「引擎答了」与「引擎根本没起来」。原来只有一句人读的 `reason` |
+| **测试** | `require_spawn(self, what)` 探针（**用解释器自身 `-c pass`，不用假脚本**，所以它隔离的正是它声称的问题）+ 明确的跳过理由 |
+
+**而 `spawn_failed` 不是一个只为测试存在的字段** —— 任何人读报告都该分得清
+「没有结论」与「进程没起来」。**这与 `R-1` 是同一条主线：把声明变成可核对的东西。**
+
+## 验证
+
+连跑 **6 次全绿**，而跳过数**自适应**：
+
+```
+能 spawn 时:  382 passed, 20 skipped   53–75 秒
+不能时:       373 passed, 29 skipped   8–34 秒
+              SKIPPED test/test_feed.py:141: this machine refused to spawn a process, so the
+              injected clamscan could not be exercised; not a product defect
+```
+
 
 ---
 

@@ -30,6 +30,12 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+
+# The scanner tests below need to start a process, and on this machine doing so is intermittently
+# refused (`OSError: [WinError 6]`). That is not a verdict coming back wrong -- it is no verdict
+# coming back at all -- so it is skipped rather than failed. The probe lives in test_feed because
+# that is where the same problem first showed up.
+from test_feed import require_spawn  # noqa: E402
 sys.path.insert(0, str(HERE))
 
 spec = importlib.util.spec_from_file_location("tk_handoff", HERE.parent / "torikago.py")
@@ -54,18 +60,23 @@ class TestTheHandoffNeverRemediates(unittest.TestCase):
 
     def test_it_reports_that_remediation_was_disabled(self):
         """A caller must be able to tell which mode ran, from the result alone."""
+        require_spawn(self, "Windows Defender")
         if not HAVE_DEFENDER:
             self.skipTest("Defender is not installed here")
         with tempfile.TemporaryDirectory() as tmp:
             f = Path(tmp) / "harmless.txt"
             f.write_text("nothing to see\n", encoding="utf-8")
             r = tk.scan_with_defender([f])
-        self.assertTrue(r["ok"])
+        self.assertIn("spawn_failed", r,
+                      "the result must say whether the engine answered at all, as opposed to "
+                      "answering with no threats")
+        self.assertTrue(r["ok"], r)
         self.assertTrue(r["remediation_disabled"],
                         "the result does not say whether the engine was allowed to change files")
 
     def test_the_file_is_still_there_afterwards(self):
         """The concrete consequence, asserted rather than assumed."""
+        require_spawn(self, "Windows Defender")
         if not HAVE_DEFENDER:
             self.skipTest("Defender is not installed here")
         with tempfile.TemporaryDirectory() as tmp:
@@ -79,6 +90,7 @@ class TestTheVerdictIsTheEnginesNotOurs(unittest.TestCase):
     """Nothing in the output may read as this tool's own conclusion."""
 
     def test_the_result_carries_the_attribution_note(self):
+        require_spawn(self, "Windows Defender")
         if not HAVE_DEFENDER:
             self.skipTest("Defender is not installed here")
         with tempfile.TemporaryDirectory() as tmp:
@@ -89,6 +101,7 @@ class TestTheVerdictIsTheEnginesNotOurs(unittest.TestCase):
         self.assertFalse(r["executed"], "the handoff must report that nothing was run")
 
     def test_a_clean_result_is_marked_as_the_engines(self):
+        require_spawn(self, "Windows Defender")
         if not HAVE_DEFENDER:
             self.skipTest("Defender is not installed here")
         with tempfile.TemporaryDirectory() as tmp:

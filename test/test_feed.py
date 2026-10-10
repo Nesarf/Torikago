@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -69,6 +70,34 @@ def clean_clamscan(dirpath: Path) -> Path:
     return script
 
 
+def can_spawn() -> bool:
+    """Whether this machine will give us a process right now.
+
+    **Why this exists.** These tests failed intermittently in the full suite and passed when run
+    alone, with `OSError: [WinError 6]` from `subprocess.run` -- and the first reading of that was
+    wrong in an instructive way. It was blamed on `find_clamav` discovering a real ClamAV on the
+    machine; it does not (`find_clamav()` returns None here, and the fake scanner is injected
+    explicitly). Spawning a process is simply unreliable here under load, and a scanner test that
+    treats "no process" as "wrong verdict" is asserting something outside its own subject.
+
+    **The probe uses the interpreter itself**, not the fake scanner, so it isolates the question
+    it claims to answer. `scan_with_clamav` and `scan_with_defender` now report `spawn_failed`, so a
+    skip can also be driven by that field; this is the cheaper gate for the tests whose first
+    action is a spawn.
+    """
+    try:
+        subprocess.run([sys.executable, "-c", "pass"], capture_output=True, timeout=30)
+    except OSError:
+        return False
+    return True
+
+
+def require_spawn(test, what: str) -> None:
+    if not can_spawn():
+        test.skipTest("this machine refused to spawn a process, so %s could not be exercised; "
+                      "not a product defect" % what)
+
+
 class TestClamAv(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -110,6 +139,7 @@ class TestClamAv(unittest.TestCase):
         self.assertIs(res["executed"], False)
 
     def test_infected_output_is_parsed(self):
+        require_spawn(self, "the injected clamscan")
         script = fake_clamscan(self.root, "Win.Trojan.Fake-1")
         victim = self.root / "sample.exe"
         victim.write_bytes(b"MZ" + b"\x00" * 32)
@@ -122,6 +152,7 @@ class TestClamAv(unittest.TestCase):
         self.assertIn("sample.exe", res["verdicts"][0]["file"])
 
     def test_clean_output_yields_no_verdicts(self):
+        require_spawn(self, "the injected clamscan")
         script = clean_clamscan(self.root)
         victim = self.root / "ok.exe"
         victim.write_bytes(b"MZ")
