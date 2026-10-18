@@ -3104,6 +3104,124 @@ def _print_handoff(handoff) -> None:
         return
 
 
+# -- the window: a panel painted from files this tree embeds -----------------------------------
+#
+# The family rule is that the shared pixel layer is produced once, in Ichiwatashi, and *embedded* --
+# nothing is read from another project at run time. So the layout and the 5x7 font are two files
+# beside this one, and `panel_window` paints them. **Nothing here recomputes the frame**: a second
+# opinion about where the border goes is how two tools end up with two windows that both look right
+# and neither is checkable.
+
+def _embedded(name):
+    """Where an embedded data file lives: beside this module, or in the install's share directory.
+
+    **Two locations because there are two ways to run this.** From a clone the file sits next to
+    `torikago.py`; from a wheel it cannot, because a flat `py-modules` distribution can carry modules
+    and not data -- so the two JSON files travel as `data-files` under `<prefix>/share/torikago`.
+    Measured on a built wheel before this resolver existed: `panel_window.py` shipped, the JSON did
+    not, and `--window` raised FileNotFoundError for anyone who installed instead of cloning.
+    """
+    beside = Path(__file__).with_name(name)
+    if beside.is_file():
+        return beside
+    import sysconfig
+
+    return Path(sysconfig.get_path("data")) / "share" / "torikago" / name
+
+
+PANEL_JSON = _embedded("panel.json")
+PANEL_FONT = _embedded("font.json")
+
+
+def _report_lines(report: dict) -> list:
+    """Exactly the lines the terminal would have printed, captured instead of re-formatted.
+
+    **Captured, not refactored.** A window with its own formatter would be a second answer to "what
+    did this command say", and the terminal and the window could then disagree without either one
+    being wrong. The report already exists by the time this runs, so a formatting bug here can only
+    cost the window, never the analysis.
+    """
+    import contextlib
+    import io
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        print_human(report)
+        _print_handoff(report.get("handoff"))
+    lines = buf.getvalue().splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+
+def _wrap_lines(lines: list, cols: int) -> list:
+    """Break lines wider than the panel, and **mark the breaks**.
+
+    The content area is 118 characters wide while the report is formatted for a terminal, so a long
+    path or a list of section names can overrun it. Clipping would be a statement the report never
+    made, and a silent wrap would read as another row of the report -- so a wrapped line ends with a
+    backslash, which is the one thing that keeps "this continues" apart from "this is a new line".
+    """
+    out = []
+    for line in lines:
+        if len(line) <= cols:
+            out.append(line)
+            continue
+        rest = line
+        while len(rest) > cols - 2:
+            # **Search past the continuation indent, not from column 0.** The first version searched
+            # from 0 and found the space inside its own two-space indent, so every pass cut at index 1,
+            # re-indented, and arrived at the same length forever -- a hang, not a failure. The indent
+            # is the one region a break can never be in.
+            indent = len(rest) - len(rest.lstrip())
+            cut = rest.rfind(" ", indent + 1, cols - 2)
+            if cut <= indent:
+                cut = cols - 2                 # one word wider than the panel: break it rather than loop
+            out.append(rest[:cut].rstrip() + " \\")
+            rest = "  " + rest[cut:].lstrip()
+        out.append(rest)
+    return out
+
+
+def _show_report_window(report: dict, path: Path) -> int:
+    """Draw the report in a window, or **say why it could not and print the report instead**.
+
+    Degrading is the right failure here -- the analysis already succeeded and its text is the
+    deliverable -- but it must be loud. A window that silently turns into terminal output would leave
+    the caller unsure whether `--window` did anything at all.
+    """
+    import panel_window as pw
+
+    fallback = sys.stderr
+    try:
+        layout = pw.load(PANEL_JSON)
+        draw = pw.load_font(PANEL_FONT)
+    except (OSError, ValueError) as exc:
+        print("could not read the embedded panel (%s); printing the report instead" % exc, file=fallback)
+        print_human(report)
+        _print_handoff(report.get("handoff"))
+        return 0
+
+    lines = _wrap_lines(_report_lines(report), layout.body_cols)
+    # The title is the tool's, not the layout's: the bar's geometry is shared, the words in it are not.
+    pages = layout.page_count(lines)
+    marker = ("%d/%d" % (pages, pages)) if pages > 1 else ""
+    room = layout.title_room[1] - ((len(marker) + 1) * pw.CELL_W if marker else 0)
+    title = "TORIKAGO - %s" % path.name
+    fit = room // pw.CELL_W
+    if len(title) > fit:
+        # Elided here rather than refused by the renderer: a long filename is not a reason to withhold
+        # the window, and the renderer's refusal is kept for the case this arithmetic cannot fix.
+        title = title[:max(0, fit - 2)] + ".." if fit > 2 else title[:max(0, fit)]
+    try:
+        pw.open_window(layout, lines, title=title, scale=2, draw_fn=draw)
+    except Exception as exc:                                   # noqa: BLE001
+        print("could not open a window (%s); printing the report instead" % exc, file=fallback)
+        print_human(report)
+        _print_handoff(report.get("handoff"))
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="torikago",
@@ -3112,6 +3230,10 @@ def main(argv=None) -> int:
     ap.add_argument("-o", "--out", help="directory for report.json and rule.yar")
     ap.add_argument("--json", action="store_true", help="print JSON instead of a summary")
     ap.add_argument("--quiet", action="store_true", help="write files only")
+    ap.add_argument("--window", action="store_true",
+                    help="draw the human report in a window this tool paints itself, from a panel "
+                         "layout and a 5x7 font embedded in this repository. The lines are the same "
+                         "ones the terminal would print, captured rather than re-formatted")
     ap.add_argument("--max-bytes", type=float, default=DEFAULT_MAX_BYTES,
                     help="refuse to analyse a file larger than this (default %d; suffix not "
                          "accepted, so give bytes)" % DEFAULT_MAX_BYTES)
@@ -3191,6 +3313,36 @@ def main(argv=None) -> int:
     ap.add_argument("--feed", choices=("misp", "stix", "both"),
                     help="write threat-intelligence output for sharing (misp=xml, stix=json)")
     args = ap.parse_args(argv)
+
+    if args.window:
+        # **`--window` draws one file's report, so pairing it with a mode that returns before that
+        # report exists would accept the flag and do nothing.** A flag that is accepted and ignored is
+        # worse than one that is refused: the caller believes a window was opened. Every alternative
+        # mode is named here on purpose -- a new one belongs in this list.
+        alts = [flag for flag, on in (
+            ("--scan", bool(args.scan)),
+            ("--corpus-write", bool(args.corpus_write)),
+            ("--corpus-check", bool(args.corpus_check)),
+            ("--corpus-verify", bool(args.corpus_verify)),
+            ("--posture", args.posture),
+            ("--quarantine-list", args.quarantine_list is not None),
+            ("--vault-store", bool(args.vault_store)),
+            ("--vault-list", args.vault_list is not None),
+            ("--vault-extract", bool(args.vault_extract)),
+            ("--fetch-sample", args.fetch_sample is not None),
+            ("--tag", bool(args.tag)),
+            ("--recent", args.recent),
+            ("--quota", args.quota),
+            ("--json", args.json),
+            ("--quiet", args.quiet),
+        ) if on]
+        if alts:
+            print("--window draws the report for one file, so it cannot be combined with %s"
+                  % ", ".join(alts), file=sys.stderr)
+            return 2
+        if not args.target:
+            print("--window needs a file to report on: give me one to inspect", file=sys.stderr)
+            return 2
 
     path = Path(args.target) if args.target else None
     if path is not None and not path.exists():
@@ -3535,6 +3687,10 @@ def main(argv=None) -> int:
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=1))
+    elif args.window:
+        # The alternative modes and `--quiet`/`--json` were refused at the top, so this is the only
+        # path that opens a window and it cannot reach here with nothing to draw.
+        return _show_report_window(report, path)
     elif not args.quiet:
         print_human(report)
         # Printed last, after the file's own details. It was printed *before* them, and a reader who

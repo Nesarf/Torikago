@@ -35,6 +35,13 @@ vault = ["pyzipper>=0.3.6"]
 # matches the rule against anything -- compiling parses text, matching would run a pattern
 # engine over the sample, and that is the "Never runs the target" red line.
 yara = ["yara-python>=4.3"]
+# `--window` needs an image library. Measured on a clean venv install of this wheel: `import
+# panel_window` succeeds (PIL is imported inside the drawing call), then `open_window` raises
+# ModuleNotFoundError and the tool prints the report instead -- loud, and still no window. Same shape
+# as the two above, and the same rule: the base install stays empty and the extra is named.
+# tkinter is not listed because it is not a pip package: Windows ships it with the official
+# interpreter, and a Linux box installs `python3-tk` from its distribution.
+window = ["pillow>=9"]
 
 [project.scripts]
 torikago = "torikago:main"
@@ -65,4 +72,16 @@ py-modules = [
     "sample_vault",
     "provider_malshare",
     "take_samples",
+    # `--window` paints a panel from two files Ichiwatashi exports, and the module that does the
+    # painting has to be in the wheel for that to be possible after `pip install`. Same defect as
+    # `unpack.py` above, one flag further along: the local tree has the file, so every local test
+    # passes and the published package cannot open a window at all.
+    "panel_window",
 ]
+
+# The two files the window is painted from. **They are not modules, so `py-modules` cannot carry
+# them**, and `package-data` only applies to packages -- this distribution is a flat set of modules.
+# Measured on a built wheel: without this table the wheel holds `panel_window.py` and neither JSON,
+# so `--window` raises FileNotFoundError for every user who installed rather than cloned.
+[tool.setuptools.data-files]
+"share/torikago" = ["panel.json", "font.json"]

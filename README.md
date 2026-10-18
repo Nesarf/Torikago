@@ -77,7 +77,9 @@ or put `nanodesu.py` somewhere `torikago` can find it:
 
 `torikago` itself declares **no dependencies**, deliberately: it is meant to run on a machine you
 do not trust, so every dependency it does not have is one less thing a reader has to audit. The
-PyInstaller half is an extra rather than a requirement for that reason.
+PyInstaller half is an extra rather than a requirement for that reason. The same holds for the
+window: `pip install torikago[window]` brings the image library `--window` draws with, and without
+it the flag prints the report and says why instead of failing.
 
 If it is absent, the failure says so and names the fix rather than leaving you to work it out:
 
@@ -100,6 +102,7 @@ python torikago.py --scan ./downloads             # which of these files deserve
 
 python torikago.py suspicious.exe --handoff defender   # ask a real engine, report ITS verdict
 python torikago.py --posture                      # what is protecting this machine, read-only
+python torikago.py suspicious.exe --window        # the same report, in a window this tool paints
 
 python torikago.py --scan ./downloads --scan-only exe,dll --scan-limit 500
 python torikago.py --corpus-write ./downloads --corpus-file corpus/manifest.jsonl
@@ -135,6 +138,36 @@ executed    : no (never)
 Every entry in `next steps` is marked either `safe (no execution)` or
 `needs execution`; anything in the second category comes with the instruction to do it in
 a VM, and this tool does not do it for you.
+
+## The window
+
+```bash
+python torikago.py suspicious.exe --window
+```
+
+**The same report, drawn instead of printed.** The lines are captured from the code that already
+writes them, not re-formatted for the window, so a terminal and the window cannot disagree about what
+a command said.
+
+**The frame is not drawn here.** `panel.json` and `font.json` are exported by
+[Ichiwatashi](https://github.com/Nesarf/Ichiwatashi), the family's shared pixel layer, and both carry a
+checksum over their own contents — so a layout edited by hand after export is refused instead of drawn
+almost right. Nothing is imported from another repository at run time; the two files are embedded.
+
+| Property | How it holds |
+|---|---|
+| **The system title bar is gone** | the panel draws its own, and dragging uses the title rectangle from the layout |
+| **The close mark is a real control** | the `x` in the corner is nine pixels the file names, and clicking them closes the window |
+| **Long reports page rather than clip** | `1/3` at the right of the bar, Up/Down by a row, PageUp/PageDown by a page |
+| **A title that does not fit is refused** | with both numbers in the message; a bar showing a different word is worse than no window |
+
+The panel is 716 by 385 logical pixels — 118 characters by 46 rows, the same grid the other tools in
+this family lay out — scaled by a whole number with nearest-neighbour, because a fractional resize is
+no longer the art that was drawn.
+
+`--window` shows one file's report. Paired with `--scan`, `--json`, `--quiet` or any of the other
+alternative modes it is refused rather than ignored: an accepted flag that does nothing leaves the
+caller believing a window opened.
 
 ## Handing the evidence to something that decides
 
