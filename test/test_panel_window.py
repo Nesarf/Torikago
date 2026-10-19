@@ -46,7 +46,10 @@ class TestTheEmbeddedLayout(unittest.TestCase):
         self.assertEqual(body["format"], pw.FORMAT)
         self.assertEqual(body["tier"], "console")
         self.assertEqual(tuple(body["size"]), (716, 385))
-        self.assertEqual(len(body["roles"]), 8)
+        # Nine since `content_text` joined the table: the bar's ink and the body's are two jobs, and all
+        # three renderers used to do both with one colour.
+        self.assertEqual(len(body["roles"]), 9)
+        self.assertIn("content_text", body["roles"])
         want = body["checksum"]
         got = hashlib.sha256(pw.canonical({k: v for k, v in body.items() if k != "checksum"}
                                           ).encode("utf-8")).hexdigest()
@@ -117,6 +120,57 @@ class TestTheEmbeddedLayout(unittest.TestCase):
         extra = re.search(r"^window\s*=\s*\[([^\]]*)\]", pyproject, re.M)
         self.assertIsNotNone(extra, "no `window` extra, so a pip install can never draw one")
         self.assertIn("pillow", extra.group(1).lower())
+
+
+class TestTheBodyInk(unittest.TestCase):
+    """Body text used to be drawn in the title bar's ink by all three renderers.
+
+    So a change to the bar's colour silently restyled every report, and nothing anywhere said the body was
+    borrowing. The layout names the job now -- and a file exported before the role existed still draws, in
+    the colour it always used, so upgrading one side of an embedding does not break the other.
+    """
+
+    def test_the_two_inks_are_separate_jobs(self):
+        body_key = LAYOUT.key_of["content_text"]
+        title_key = LAYOUT.key_of["title_text"]
+        self.assertNotEqual(body_key, title_key, "one key for two jobs is the defect this role replaced")
+        self.assertEqual(LAYOUT.content_ink, LAYOUT.colours[body_key])
+        self.assertNotEqual(LAYOUT.content_ink, LAYOUT.colours[title_key],
+                            "both inks are the same colour, so nothing would show the role is being used")
+
+    def test_rendered_body_text_uses_that_ink_and_not_the_bar_s(self):
+        """Asserted on pixels rather than on the property: the property could be right while the renderer
+        ignored it, which is the shape of every wiring defect this family has found."""
+        cx0, cy0, _cx1, _cy1 = LAYOUT.layout["content"]
+        _tx0, ty0, _tx1, _ty1 = LAYOUT.layout["title"]
+        start, _room = LAYOUT.title_room
+        im = pw.image(LAYOUT, ["I"], title="T", scale=1, draw_fn=GLYPH)
+
+        def cell(x, y):
+            return [im.getpixel((x + dx, y + dy))
+                    for dy in range(pw.CELL_H) for dx in range(pw.CELL_W)]
+
+        body, title = cell(cx0, cy0), cell(start, ty0 + 1)
+        self.assertIn(LAYOUT.content_ink, body, "the body was not drawn in the layout's own ink")
+        self.assertNotIn(LAYOUT.colours[LAYOUT.key_of["title_text"]], body,
+                         "the body is still borrowing the title bar's ink")
+        self.assertIn(LAYOUT.colours[LAYOUT.key_of["title_text"]], title)
+        self.assertNotIn(LAYOUT.content_ink, title, "the title is drawn in the body's ink")
+
+    def test_a_file_without_the_role_falls_back_to_the_title_ink(self):
+        body = json.loads((ROOT / "panel.json").read_text(encoding="utf-8"))
+        body["roles"] = [r for r in body["roles"] if r != "content_text"]
+        del body["keys"]["content_text"]
+        # The colour stays in the table, because that is what an older export looks like: the role is what a
+        # reader asks for, and its absence is the question being answered here.
+        body["checksum"] = hashlib.sha256(
+            pw.canonical({k: v for k, v in body.items() if k != "checksum"}).encode("utf-8")).hexdigest()
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "panel.json"
+            p.write_text(json.dumps(body), encoding="utf-8")
+            old = pw.load(p)
+        self.assertNotIn("content_text", old.key_of)
+        self.assertEqual(old.content_ink, old.colours[old.key_of["title_text"]])
 
 
 class TestRefusalsInsteadOfCuts(unittest.TestCase):
