@@ -60,23 +60,52 @@ jobs:
       - name: Validate the distributions
         run: python -m twine check dist/*
 
-      - name: List what is actually in the wheel
+      - name: List what is actually in the wheel, and refuse a missing part
         # A build that succeeds says nothing about its contents. A release of this very package once
         # shipped without `unpack.py` -- the whole implementation behind `--unpack` -- and the build,
-        # `twine check` and the install all reported success. Only the file list showed it. Printing
-        # the list costs nothing and would have caught it at the source.
+        # `twine check` and the install all reported success. Only the file list showed it.
+        #
+        # The window added three things that can go missing the same way, and the check was written for
+        # two files: `panel_window.py`, plus the two JSON files it paints from. Those travel as
+        # `data-files`, so they land under `share/torikago` with the version in the path -- matched by
+        # suffix rather than by full name, so adding them does not pin the version here.
         run: |
           python - <<'PY'
           import glob, zipfile
+          names = set()
           for wheel in sorted(glob.glob("dist/*.whl")):
               print(wheel)
               for name in zipfile.ZipFile(wheel).namelist():
                   print("   ", name)
-          expected = {"torikago.py", "unpack.py"}
-          present = {n for w in glob.glob("dist/*.whl") for n in zipfile.ZipFile(w).namelist()}
-          missing = expected - present
+                  names.add(name)
+          missing = sorted({"torikago.py", "unpack.py", "panel_window.py"} - names)
+          for wanted in ("share/torikago/panel.json", "share/torikago/font.json"):
+              if not any(n.endswith(wanted) for n in names):
+                  missing.append(wanted)
           if missing:
-              raise SystemExit("the wheel is missing %s" % sorted(missing))
+              raise SystemExit("the wheel is missing %s" % missing)
+          print("every required entry is present")
+          PY
+
+      - name: The installed wheel can paint its own panel
+        # The check a file list cannot make. `_embedded()` looks beside the module first and then in
+        # `<prefix>/share/torikago`; only the second branch exists for somebody who ran `pip install`,
+        # and it is the branch nobody exercises by developing from a clone. Installed from a directory
+        # that is not the checkout, because a path relative to the working directory passes here and
+        # fails for every user.
+        run: |
+          python -m venv /tmp/verify
+          /tmp/verify/bin/python -m pip install --quiet dist/*.whl Pillow
+          cd /tmp
+          /tmp/verify/bin/python - <<'PY'
+          import pathlib, sysconfig
+          import panel_window as pw
+          share = pathlib.Path(sysconfig.get_path("data")) / "share" / "torikago"
+          layout = pw.load(str(share / "panel.json"))
+          draw = pw.load_font(str(share / "font.json"))
+          image = layout.image(["the installed copy paints its own panel"], title="RELEASE", draw_fn=draw)
+          assert image.size[0] > 0 and image.size[1] > 0, image.size
+          print("painted %s from %s" % (image.size, share))
           PY
 
       - name: Is this version already on PyPI?
