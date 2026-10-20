@@ -2452,21 +2452,33 @@ def should_stage(report: dict, min_attention: int = 1, min_weak: int = 5) -> tup
     capability = evaluate_capability(report)
     report["capability"] = capability
 
+    # **A variant is a rewritten copy, so its attention tally is not comparable to the original's.** The
+    # staging thresholds were calibrated on ordinary files; quoting a rewritten file's reasons would present
+    # them as the reasons of the sample somebody submitted. Capability and destructive findings are
+    # structural facts and survive a rewrite, so those still stand on their own -- only the tally is set
+    # aside, and the verdict says which of the two happened.
+    name = str(report.get("file") or "")
+    is_variant = "_defanged" in name.lower() or bool(report.get("variant_of"))
+    prefix = "rewritten variant: " if is_variant else ""
+
     if capability["level"] in ("high", "some"):
         # Quoted, so the operator can disagree with the judgement rather than only with the verdict.
-        return True, "capability %s: %s" % (capability["level"],
-                                            "; ".join(capability["reasons"])[:240])
+        return True, prefix + "capability %s: %s" % (capability["level"],
+                                                     "; ".join(capability["reasons"])[:240])
 
     destructive = report.get("destructive") or {}
     if destructive.get("highest") in ("high", "critical"):
-        return True, "destructive capability reported at %s" % destructive["highest"]
+        return True, prefix + "destructive capability reported at %s" % destructive["highest"]
     strong = high_confidence_reasons(report)
-    if strong and report["assessment"]["attention"] >= min_attention:
-        return True, "attention: %s" % "; ".join(strong)[:240]
+    if strong and report["assessment"]["attention"] >= min_attention and not is_variant:
+        return True, prefix + "attention: %s" % "; ".join(strong)[:240]
     weak = report["assessment"]["attention"]
-    if weak >= min_weak:
+    if weak >= min_weak and not is_variant:
         return True, "%d weak signals: %s" % (
             weak, "; ".join(report["assessment"]["reasons"])[:200])
+    if is_variant and weak:
+        return False, ("rewritten variant: its %d attention signal(s) describe the modified copy, not the "
+                       "original sample -- re-run this on the original before staging" % weak)
     return False, "nothing flagged above the staging threshold (weak signals: %d)" % weak
 
 
