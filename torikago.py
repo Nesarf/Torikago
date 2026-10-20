@@ -3625,8 +3625,17 @@ def main(argv=None) -> int:
             if full.resolve() == manifest_path.resolve():
                 skipped.append(row["path"])
                 continue
-            entries.append(corpus_mod.entry_from_row(
-                row, sha=corpus_mod.sha256_file(full)))
+            sha = corpus_mod.sha256_file(full)
+            entries.append(corpus_mod.entry_from_row(row, sha=sha))
+            # **Two layers, two jobs.** The manifest carries the ten fields a diff compares, so a detector
+            # change stays readable; this carries the scan row itself, `all_imports` included, so a verdict
+            # can be re-derived later without the sample. The measurement that settled it: the scan row is
+            # *not* a summary -- it has fewer keys than the manifest row only because the manifest adds
+            # bookkeeping, and it carries facts the manifest drops on purpose.
+            raw_dir = manifest_path.parent / corpus_mod.RAW_DIR
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            (raw_dir / (sha + ".json")).write_text(
+                json.dumps(row, ensure_ascii=False, indent=1), encoding="utf-8")
 
         merged = corpus_mod.merge_manifest(before, entries)
         corpus_mod.write_manifest(manifest_path, merged["entries"])

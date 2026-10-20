@@ -36,6 +36,12 @@ from pathlib import Path
 MANIFEST_NAME = "manifest.jsonl"
 SCHEMA_VERSION = 1
 
+#: Where the second layer lives, beside the manifest: **one file per sample, the scan row as produced.**
+#: The manifest keeps the ten fields a diff compares, which is what makes it readable as a diff; this layer
+#: keeps the rest -- `all_imports` above all, which the injection-triad judgement needs and the manifest
+#: deliberately drops. Neither layer can do the other's job, and a normal run never reads this one.
+RAW_DIR = "raw"
+
 # The fields copied from an assessment row. Everything else is derived or dropped on purpose -- see
 # the module docstring on why `all_imports` is not here.
 ROW_FIELDS = (
