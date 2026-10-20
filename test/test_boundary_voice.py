@@ -94,6 +94,29 @@ class TestTheBoundaryLine(unittest.TestCase):
         for line in all_lines():
             self.assertNotIn(line, out, "a persona line reached the JSON path: %r" % line)
 
+    def test_no_persona_line_reaches_any_written_artifact(self):
+        """Every file the tool writes, not one path: `report.json`, the drafted rule, the two feed formats and
+        the corpus manifest are all consumed by something that would choke on a sentence -- or worse, keep it.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "one.exe"
+            target.write_bytes(tn.build_pe())
+            out = Path(d) / "out"
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = tri.main([str(target), "-o", str(out), "--feed", "both"])
+            self.assertEqual(rc, 0, buf.getvalue())
+            written = [p for p in out.rglob("*") if p.is_file()]
+            self.assertTrue(written, "nothing was written, so this test checks nothing")
+            for path in written:
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    continue                 # a binary artifact cannot carry a sentence, and is skipped
+                for line in all_lines():
+                    self.assertNotIn(line, text,
+                                     "%s carries a persona line: %r" % (path.name, line))
+
 
 if __name__ == "__main__":
     unittest.main()
