@@ -196,8 +196,15 @@ def write_manifest(path: Path, entries: dict) -> Path:
 
 
 def summarize(entries: dict) -> dict:
-    """What the corpus holds, by the fields the assessor produces."""
-    out = {"files": len(entries), "packer": {}, "kind": {}, "attention": 0}
+    """What the corpus holds, by the fields the assessor produces.
+
+    **Including how much of each row was actually measured.** `R-1` gave every row a coverage value --
+    complete, partial, unknown -- so that a truncated measurement could be told from a full one. A summary
+    that leaves that out re-flattens them: 1,161 rows reads like 1,161 complete measurements however many
+    of them stopped early. Counted here so a reader can see it before trusting any rate in the table.
+    """
+    out = {"files": len(entries), "packer": {}, "kind": {}, "attention": 0,
+           "coverage": {MEASUREMENT_COMPLETE: 0, MEASUREMENT_PARTIAL: 0, MEASUREMENT_UNKNOWN: 0}}
     for entry in entries.values():
         packer = entry.get("packer") or "unknown"
         packer = packer if isinstance(packer, str) else str(packer)
@@ -206,6 +213,8 @@ def summarize(entries: dict) -> dict:
         out["kind"][kind] = out["kind"].get(kind, 0) + 1
         if entry.get("attention"):
             out["attention"] += 1
+        state = coverage_of(entry).get("measurement") or MEASUREMENT_UNKNOWN
+        out["coverage"][state] = out["coverage"].get(state, 0) + 1
     return out
 
 

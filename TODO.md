@@ -367,7 +367,7 @@ venv (yara 4.5.4):      5 passed                ← 编译分支通过
 | **R-1** | `[x]` | **corpus 行分三类：可信 / 已知截断 / 来源不明** | **已做（1.20.2）**：`corpus.coverage_of()` 从行本身推导 `coverage.measurement`（complete/partial/unknown），**旧行一律 unknown 而不是 complete**——一条测试读真实 manifest 断言这一点。原描述： 现在这三种**长得一样**。一个被静默截断的测量与一个完整的测量在 diff 里无法区分——**而"不可瞒报"要求它们必须能区分** |
 | **R-2** | `[ ]` | **同一 sha256 两次测量不一致时报出，不静默取新** | 现在后写覆盖先写，**"样本变了"与"检测器变了"分不开** |
 | **R-3** | `[ ]` | **旧 `schema` 行的重测与回填路径** | `schema` 字段已有，缺迁移——**旧行现在只是"旧"，不是"不可信"** |
-| **R-4** | `[ ]` | **已知截断的行标成不可信，或要求重扫** | 与 `--corpus-verify` 天然配套 |
+| **R-4** | `[x]` | **已知截断的行标成不可信，或要求重扫** | **已做**：`summarize` 现在按三种状态计数（`coverage`：complete／partial／unknown），而 `--corpus-check` 把它印出来 —— **原因就是那条待办自己写的**：一个被截断的测量与一个完整的测量在 diff 里长得一样，而 1,161 行读起来像 1,161 个完整测量，除非汇总里有这一行。**并且说清它意味着什么**：只要有 partial 或 unknown，输出就加一句「a row whose measurement stopped early is not a verdict: re-sweep it before quoting its rate」。五条测试（三态计数 · 只有完整行时也对 · 人类输出 · 那句话 · `--json` 带计数）。 |
 | **R-5** | `[x]` | **校准依据版本化** | **已做**：阈值从注释变成数据 —— `CALIBRATION`（`version` 1 · `measured` 2026-10-05 · `sample` 298 · `ubiquitous` 四项 · `rare` 三项）。`--corpus-check` 现在把「评级依据」一起印出来（`--json` 时进 `calibration` 键），因为那正是「语料长大了」时读者会跑的命令。**而注释与数据被双向钉住**：`test_calibration.py` 断言 docstring 引用的七个比例与表里的值**互相一一对应**、表里每一项都被引用 —— 改表不改注释（或反过来）都会红。**已实测**：把 `0.997` 改成 `0.951`，测试报「disagree」。另外两条也断言了：`ubiquitous` 的每一项都必须比 `rare` 的任何一项常见（否则那两个名字只是标签），以及 `version` 必须是正整数。 |
 
 **共同点**：**它们都让"没找到"与"没有"更分得开**——

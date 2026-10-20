@@ -3535,6 +3535,15 @@ def main(argv=None) -> int:
                                               key=lambda kv: -kv[1])[:6]))
             print("  by kind      : %s" % ", ".join(
                 "%s=%d" % kv for kv in sorted(stats["kind"].items(), key=lambda kv: -kv[1])[:6]))
+            # **How much of each row was measured**, printed in the summary rather than left per row:
+            # a truncated measurement and a full one looked alike in a diff, and 1,161 rows reads like
+            # 1,161 complete measurements unless this line exists.
+            print("  coverage     : %s" % ", ".join(
+                "%s=%d" % (k, v) for k, v in sorted(stats["coverage"].items())))
+            if (stats["coverage"].get(corpus_mod.MEASUREMENT_PARTIAL)
+                    or stats["coverage"].get(corpus_mod.MEASUREMENT_UNKNOWN)):
+                print("                 a row whose measurement stopped early is not a verdict: "
+                      "re-sweep it before quoting its rate")
             print()
             print("  rating basis (CALIBRATION v%d, measured %s)"
                   % (CALIBRATION["version"], CALIBRATION["measured"]))
