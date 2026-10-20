@@ -3582,6 +3582,13 @@ def main(argv=None) -> int:
             # 1,161 complete measurements unless this line exists.
             print("  coverage     : %s" % ", ".join(
                 "%s=%d" % (k, v) for k, v in sorted(stats["coverage"].items())))
+            print("  schema       : %s" % ", ".join(
+                "%s=%d" % (k, v) for k, v in sorted(stats["schema"].items())))
+            older = [k for k in stats["schema"] if k != str(corpus_mod.SCHEMA_VERSION)]
+            if older:
+                print("                 rows written under an older schema (%s) are old, not untrustworthy:"
+                      % ", ".join(older))
+                print("                 re-measure them before mixing their numbers with the current ones")
             if (stats["coverage"].get(corpus_mod.MEASUREMENT_PARTIAL)
                     or stats["coverage"].get(corpus_mod.MEASUREMENT_UNKNOWN)):
                 print("                 a row whose measurement stopped early is not a verdict: "

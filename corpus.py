@@ -210,7 +210,8 @@ def summarize(entries: dict) -> dict:
     of them stopped early. Counted here so a reader can see it before trusting any rate in the table.
     """
     out = {"files": len(entries), "packer": {}, "kind": {}, "attention": 0,
-           "coverage": {MEASUREMENT_COMPLETE: 0, MEASUREMENT_PARTIAL: 0, MEASUREMENT_UNKNOWN: 0}}
+           "coverage": {MEASUREMENT_COMPLETE: 0, MEASUREMENT_PARTIAL: 0, MEASUREMENT_UNKNOWN: 0},
+           "schema": {}}
     for entry in entries.values():
         packer = entry.get("packer") or "unknown"
         packer = packer if isinstance(packer, str) else str(packer)
@@ -221,6 +222,11 @@ def summarize(entries: dict) -> dict:
             out["attention"] += 1
         state = coverage_of(entry).get("measurement") or MEASUREMENT_UNKNOWN
         out["coverage"][state] = out["coverage"].get(state, 0) + 1
+        # **Which generation wrote each row.** A row from an older schema is old, not untrustworthy, and
+        # those are different things -- so the count is reported and the difference is stated rather than
+        # resolved by re-measuring quietly, which would also erase the record that the schema moved.
+        generation = str(entry.get("schema"))
+        out["schema"][generation] = out["schema"].get(generation, 0) + 1
     return out
 
 
