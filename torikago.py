@@ -2987,6 +2987,9 @@ def build_report(path: Path, out_dir: Path | None, *, max_bytes: int = DEFAULT_M
         "tool": "torikago",
         "version": VERSION,
         "file": str(path),
+        # **What bounded this run**, in the report rather than only in the source: a count that is a cap
+        # should never be readable as a count that is a fact.
+        "budget": analysis_budget(),
         "hashes": hashes_of(data, part=4096),
         "identified_as": kind,
         "name_looks_wrong": extension_mismatch(kind["kind"], path),
@@ -3079,6 +3082,28 @@ def neutralize_copy(target: Path, out_dir: Path) -> dict:
     (out_dir / (target.stem + "_defanged.json")).write_text(
         json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
     return record
+
+
+def analysis_budget() -> dict:
+    """Every ceiling an analysis runs under, as one answerable object.
+
+    These were nine constants scattered across the file -- a descriptor cap here, a peek size there, a nested
+    depth much further down. Each was correct on its own, and together they meant **a report could not say what
+    bounded it**: an operator reading "512 functions" had no way to learn that 512 was a cap rather than a
+    count. They stay as module-level constants, because that is where the parsers read them and moving them
+    would be a rename dressed as a design; this gathers them into one place a report can print.
+    """
+    return {
+        "import_descriptors": DESCRIPTOR_CAP,
+        "functions_per_descriptor": FUNC_CAP,
+        "names_per_descriptor": NAME_CAP,
+        "peek_bytes": PEEK_BYTES,
+        "scan_coverage_bytes": SCAN_COVERAGE,
+        "max_file_bytes": DEFAULT_MAX_BYTES,
+        "nested_unpack_depth": NESTED_UNPACK_MAX_DEPTH,
+        "nested_unpack_total": NESTED_UNPACK_MAX_TOTAL,
+        "yara_corpus_bytes": YARA_CORPUS_CAP,
+    }
 
 
 def build_report_with_unpack(path: Path, out_dir: Path | None, unpack: bool, *,
