@@ -2618,6 +2618,18 @@ def say(key: str) -> str:
     return entry[1] if _PLAIN else entry[0]
 
 
+def emit_boundary() -> None:
+    """The human sentence beside `executed: no (never)`: what this run did, and did not do.
+
+    The counterpart of `boundary_voice.py` in the sibling tool -- a line about the tool's own limits, kept in
+    its own function so two paths cannot word it differently. **Never called on a machine-readable path**:
+    the report's `executed` field carries the fact there, and prose in a machine-readable output would be a
+    change to a contract rather than a nicety.
+    """
+    print()
+    print(say("watching"))
+
+
 #: The measurement behind `assess`'s division of unusual from ordinary -- **as data, because a threshold
 #: nobody can trace is a guess wearing a number.** These rates were measured on one machine on one day, so
 #: they describe a population rather than a law; when the corpus grows, re-measure and bump `version`. The
@@ -3178,6 +3190,7 @@ def print_human(report: dict) -> None:
         else:
             print("antivirus   : %d scanned, nothing detected" % av.get("scanned", 0))
     print("executed    : no (never)")
+    emit_boundary()
 
 
 def _print_handoff(handoff) -> None:
