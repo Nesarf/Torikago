@@ -2528,6 +2528,33 @@ def hashes_of(data: bytes, part: int = 0) -> dict:
     return out
 
 
+#: The measurement behind `assess`'s division of unusual from ordinary -- **as data, because a threshold
+#: nobody can trace is a guess wearing a number.** These rates were measured on one machine on one day, so
+#: they describe a population rather than a law; when the corpus grows, re-measure and bump `version`. The
+#: docstring of `assess` quotes these numbers, and a test compares the two, so the prose cannot drift away
+#: from the structure that produced it.
+CALIBRATION = {
+    "version": 1,
+    "measured": "2026-10-05",
+    "sample": "298 ordinary binaries from a normal Windows installation",
+    # True of almost everything: recorded, but never ranked as attention.
+    "ubiquitous": {
+        "url": 0.997,
+        "noted_imports": 0.987,
+        "debug_info": 0.849,
+        "tls_callback": 0.695,
+    },
+    # Rare enough to be worth a reader's time.
+    "rare": {
+        "packer": 0.010,
+        "embedded_pe": 0.003,
+        "destructive": 0.007,
+    },
+    "note": "A population, not a law: 298 files, one machine, one day. Re-measure when the corpus grows "
+            "and bump `version`, so a threshold can always be traced to the sweep that justified it.",
+}
+
+
 def assess(pe: dict | None, packer: dict, strings: dict, iocs: dict,
            imports: list, embedded: list, destructive: dict | None = None,
            debug_info: dict | None = None) -> dict:
@@ -3493,6 +3520,10 @@ def main(argv=None) -> int:
                 return 1
             entries = corpus_mod.read_manifest(path)
             stats = corpus_mod.summarize(entries)
+            # **The threshold travels with the corpus check**, because this is the command a reader runs when
+            # the corpus has grown. A rating without the sweep that produced it is a number nobody can audit,
+            # and the whole reason this file records 1,161 measurements is so that a rating can be re-derived.
+            stats["calibration"] = CALIBRATION
             if args.json:
                 print(json.dumps(stats, ensure_ascii=False, indent=1))
                 return 0
@@ -3504,6 +3535,15 @@ def main(argv=None) -> int:
                                               key=lambda kv: -kv[1])[:6]))
             print("  by kind      : %s" % ", ".join(
                 "%s=%d" % kv for kv in sorted(stats["kind"].items(), key=lambda kv: -kv[1])[:6]))
+            print()
+            print("  rating basis (CALIBRATION v%d, measured %s)"
+                  % (CALIBRATION["version"], CALIBRATION["measured"]))
+            print("    sample     : %s" % CALIBRATION["sample"])
+            print("    ubiquitous : %s" % ", ".join(
+                "%s %.1f%%" % (k, 100 * v) for k, v in sorted(CALIBRATION["ubiquitous"].items())))
+            print("    rare       : %s" % ", ".join(
+                "%s %.1f%%" % (k, 100 * v) for k, v in sorted(CALIBRATION["rare"].items())))
+            print("    note       : %s" % CALIBRATION["note"])
             return 0
 
         root = Path(args.corpus_write)
