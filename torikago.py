@@ -3109,6 +3109,10 @@ def plan_unpacking(report: dict) -> list:
 
 
 def print_human(report: dict) -> None:
+    # Third beat: what she is proud of -- the file was understood without being opened. Printed before the
+    # facts rather than after, because it is the frame the facts are read in, and because the report's last
+    # line is the boundary sentence, which should be the final word.
+    print(say("see_through"))
     h = report["hashes"]
     print("file        : %s" % report["file"])
     print("size        : %d bytes" % h["size"])
@@ -3202,7 +3206,13 @@ def _print_handoff(handoff) -> None:
     if not handoff:
         return
     try:
-        for engine, result in (handoff.get("engines") or {}).items():
+        engines = handoff.get("engines") or {}
+        # Fourth beat: the judgement was somebody else's, and saying so is a fact rather than modesty.
+        # **Only when there is a verdict to credit** -- a handoff that produced no engine output must stay
+        # silent, or a caller checking "did it say anything" gets a false yes.
+        if engines:
+            print(say("credit_the_engine"))
+        for engine, result in engines.items():
             print()
             print("%s:" % engine)
             if not result.get("ok"):
@@ -3712,6 +3722,14 @@ def main(argv=None) -> int:
         if skipped:
             print("skipped  : %s (the manifest does not measure itself)" % ", ".join(skipped))
         print("manifest : %s" % manifest_path)
+        # Second beat: did this measurement reach the end of what it looked at? `stopped_here` when a cap
+        # ended it, `unknown_ahead` when nothing recorded how far it got. Those are two different answers --
+        # the coverage field keeps them apart, so the sentence does too.
+        coverage = corpus_mod.summarize(merged["entries"])["coverage"]
+        if coverage.get(corpus_mod.MEASUREMENT_PARTIAL):
+            print(say("stopped_here"))
+        elif coverage.get(corpus_mod.MEASUREMENT_UNKNOWN):
+            print(say("unknown_ahead"))
         # **A field that differs for a hash already in the manifest is reported, never absorbed.** The
         # merge used to keep the newer value and say nothing, which made "the sample changed" and "the
         # detector changed" the same event -- and those are the two things a corpus exists to separate.
@@ -3758,6 +3776,7 @@ def main(argv=None) -> int:
         if args.json:
             print(json.dumps(tree, ensure_ascii=False, indent=1))
         elif not args.quiet:
+            print(say("watching"))          # first beat: a sweep looks, it does not touch
             print_tree_report(tree)
         return 0
 
