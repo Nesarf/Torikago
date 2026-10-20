@@ -17,6 +17,11 @@ work.
 PyPI was already taken by an unrelated risk-modelling package, so the package could not simply be
 called what it was. `torikago` was free, and states something the old name could not.
 
+*The checkout directory was the last thing still called `triage`.* The package, the command and the
+repository had all become `torikago` while the local path kept the old name, so one tree answered to
+three names in four places — and a reader comparing them would reasonably take them for different
+things. It is `Torikago` now, and the six places that referenced the old path were changed with it.
+
 ## The safety model, stated up front
 
 **It never executes the target.** Not once, not on any code path. There is no
