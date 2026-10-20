@@ -3026,6 +3026,61 @@ def build_report(path: Path, out_dir: Path | None, *, max_bytes: int = DEFAULT_M
     return report
 
 
+#: The two bytes every PE starts with, and what a defanged copy replaces them with. **Two bytes at offset
+#: zero is the whole modification**: a file that does not start with them is not accepted by the loader, so
+#: the copy cannot be started by accident, while every byte the analysis cares about stays exactly where it
+#: was for anything that reads bytes.
+DOS_MAGIC = b"MZ"
+DEFANGED_MAGIC = b"XX"
+
+
+def neutralize_copy(target: Path, out_dir: Path) -> dict:
+    """Write a copy Windows will not run, plus a record of exactly what changed.
+
+    **What this is not.** Not a repair: nothing inside was understood, removed or disarmed. Not clean: the
+    contents are the same bytes. It changes the hash, so the copy stops matching threat intelligence -- which
+    is reported rather than hidden.
+
+    **What it is.** A two-byte edit at offset zero, so the loader refuses it while everything readable stays
+    readable. The original is opened for reading and never written.
+
+    **The record is half the deliverable.** Without it the variant is a file whose hash changed for reasons
+    nobody wrote down, and the next person has to guess whether it was damaged or disarmed.
+    """
+    target = Path(target)
+    original = target.read_bytes()
+    if original[:2] != DOS_MAGIC:
+        raise ValueError("%s does not start with a DOS header, so there is no PE to defang" % target.name)
+    variant_bytes = DEFANGED_MAGIC + original[2:]
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    variant = out_dir / (target.stem + "_defanged.exe")
+    variant.write_bytes(variant_bytes)
+
+    record = {
+        "kind": "defanged copy",
+        "original": str(target),
+        "variant": str(variant),
+        "original_sha256": hashlib.sha256(original).hexdigest(),
+        "variant_sha256": hashlib.sha256(variant_bytes).hexdigest(),
+        "changes": [{"offset": 0,
+                     "was": DOS_MAGIC.decode("latin-1"),
+                     "now": DEFANGED_MAGIC.decode("latin-1"),
+                     "why": "a file that does not start with MZ is not accepted by the loader"}],
+        "unchanged_bytes": len(original) - len(DOS_MAGIC),
+        "caveats": [
+            "This is a variant, not a repaired file: nothing inside it was analysed, removed or disarmed.",
+            "The hash changed, so it will not match threat intelligence or a signature any more.",
+            "It will scan clean because it is unknown, not because it is safe.",
+            "It is not called clean, safe or fixed anywhere, and that wording is deliberate.",
+        ],
+    }
+    (out_dir / (target.stem + "_defanged.json")).write_text(
+        json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+    return record
+
+
 def build_report_with_unpack(path: Path, out_dir: Path | None, unpack: bool, *,
                              max_bytes: int = DEFAULT_MAX_BYTES, force: bool = False,
                              yara_corpus=None) -> dict:
@@ -3394,6 +3449,10 @@ def main(argv=None) -> int:
                          "high or critical destructive findings always stage")
     ap.add_argument("--unpack", action="store_true",
                     help="also unpack a recognised wrapper in-process (never executes it)")
+    ap.add_argument("--neutralize", action="store_true",
+                    help="write a copy Windows will not run — `*_defanged.exe` — plus a record of the two "
+                         "bytes that changed. The original is only ever read, and the copy is a variant, "
+                         "never a repaired file")
     ap.add_argument("--scan", metavar="DIR",
                     help="triage every file in a directory and report which ones stand out")
     ap.add_argument("--corpus-write", metavar="DIR",
@@ -3491,6 +3550,26 @@ def main(argv=None) -> int:
     if path is not None and path.is_dir():
         print("that is a directory: %s -- did you mean --scan %s ?" % (path, path), file=sys.stderr)
         return 1
+
+    if args.neutralize:
+        # **A copy, never the original, and never a claim about it.** The two bytes make the loader refuse
+        # the file; nothing inside it has been understood or repaired, and the output says so in the same
+        # breath as the paths -- because a caller who reads only the first two lines must still learn it.
+        if path is None:
+            print("--neutralize needs a file to copy", file=sys.stderr)
+            return 2
+        out_dir = Path(args.out) if args.out else path.parent
+        try:
+            record = neutralize_copy(path, out_dir)
+        except (OSError, ValueError) as exc:
+            print("REFUSED: %s" % exc)
+            return 2
+        print("variant : %s" % record["variant"])
+        print("record  : %s" % (out_dir / (path.stem + "_defanged.json")))
+        print()
+        for caveat in record["caveats"]:
+            print("  - %s" % caveat)
+        return 0
 
     if args.quarantine_list:
         return list_quarantine(Path(args.quarantine_list))
