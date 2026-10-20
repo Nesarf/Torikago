@@ -27,6 +27,15 @@ SIBLING = ROOT.parent / "nanodesu-release"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(SIBLING))
 
+# **A cross-tool contract needs both tools, and a lone checkout has one.** On CI this repository is
+# cloned by itself, so loading the sibling raised FileNotFoundError while the suite was being
+# collected -- which does not read as a skip, it reads as a broken suite, and it took the release run
+# down with it. Saying the file is absent is the honest result: the agreement holds only where both
+# trees are present, which is every developer machine and no CI runner.
+if not (SIBLING / "nanodesu.py").is_file():
+    raise unittest.SkipTest("the sibling checkout %r is not present, so the contract cannot be checked"
+                            % SIBLING.name)
+
 
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, Path(path))

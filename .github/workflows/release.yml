@@ -51,6 +51,12 @@ jobs:
           echo "tag=$tag declared=$declared"
           test "$tag" = "$declared" || { echo "::error::tag $tag does not match version $declared"; exit 1; }
 
+      - name: Install the image library the suite needs to check pixels
+        # Without it the rendering tests skip instead of failing, so the gate that decides whether this
+        # release is good would quietly stop checking the pixels. The release job needs pillow anyway
+        # for the installed-wheel render below.
+        run: python -m pip install --quiet --disable-pip-version-check pillow
+
       - name: The suite must pass before anything is published
         run: python -m unittest discover -s test
 
@@ -153,6 +159,11 @@ jobs:
           persist-credentials: false
 
       - name: Create the release with the notes committed for this version
+        # **Two jobs, one release, and no ordering between them.** This job ran to completion while the
+        # publish job failed at the suite, so a GitHub release existed for a version that never reached
+        # PyPI. Re-running a release then tripped over the release it had already made, which is the
+        # "red X on a finished release" this file elsewhere goes out of its way to avoid. Leaving an
+        # existing release alone makes the job repeatable, and the notes are the same file either way.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -162,7 +173,11 @@ jobs:
             echo "::error::$notes is not in the tree; a release without notes is a release nobody can review later"
             exit 1
           fi
-          gh release create "$GITHUB_REF_NAME" \
-            --title "Torikago ${version}" \
-            --notes-file "$notes" \
-            --verify-tag
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "::notice::release $GITHUB_REF_NAME already exists; leaving it alone"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "Torikago ${version}" \
+              --notes-file "$notes" \
+              --verify-tag
+          fi

@@ -37,6 +37,17 @@ import panel_window as pw                                          # noqa: E402
 LAYOUT = pw.load(ROOT / "panel.json")
 GLYPH = pw.load_font(ROOT / "font.json")
 
+# `pillow` is an extra, and a suite that errors on its absence cannot be run on the machine that is
+# only checking the analysis. The pixels are still checked everywhere the extra is installed, and the
+# release workflow installs it so the gate that publishes sees them.
+try:
+    import PIL                                                       # noqa: F401
+    HAVE_PILLOW = True
+except ImportError:
+    HAVE_PILLOW = False
+
+needs_pillow = unittest.skipUnless(HAVE_PILLOW, "pillow is the `window` extra and is not installed")
+
 
 class TestTheEmbeddedLayout(unittest.TestCase):
     """The layout has to be the one Ichiwatashi exported, and it has to say so itself."""
@@ -76,6 +87,7 @@ class TestTheEmbeddedLayout(unittest.TestCase):
                 pw.load(p)
         self.assertIn("checksum", str(ctx.exception))
 
+    @needs_pillow
     def test_the_pixels_come_from_the_file_not_from_this_reader(self):
         """**Nothing here is a second opinion about the panel.** Change a colour, re-sign the file,
         and the rendered pixel follows -- so the frame cannot be recomputed locally without a test
@@ -138,6 +150,7 @@ class TestTheBodyInk(unittest.TestCase):
         self.assertNotEqual(LAYOUT.content_ink, LAYOUT.colours[title_key],
                             "both inks are the same colour, so nothing would show the role is being used")
 
+    @needs_pillow
     def test_rendered_body_text_uses_that_ink_and_not_the_bar_s(self):
         """Asserted on pixels rather than on the property: the property could be right while the renderer
         ignored it, which is the shape of every wiring defect this family has found."""
@@ -222,6 +235,7 @@ class TestCaseIsPreserved(unittest.TestCase):
             self.assertIn(ch, glyphs, "%r is not in the embedded font" % ch)
         self.assertNotEqual(glyphs["a"], glyphs["A"], "the two cases are the same shape")
 
+    @needs_pillow
     def test_lower_case_is_drawn_as_lower_case(self):
         from PIL import Image
 

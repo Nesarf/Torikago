@@ -948,14 +948,29 @@ class TestReportAndCli(unittest.TestCase):
             self.assertTrue(r["yara_syntax"]["reason"])
 
     def test_yara_draft_is_labelled_unreviewed(self):
+        """The label says what the draft is: generated, and reviewed by nobody.
 
+        **It needs a corpus, and the default one belongs to the host.** On Windows the system
+        directories hold the PEs the measurement wants, so a draft came back with its label; on a Linux
+        runner there are none, the tool honestly refuses to draft from an unmeasured corpus, and the
+        assertion failed because the test was about the host rather than about the tool. A corpus built
+        here makes the measurement happen wherever the suite runs.
+        """
         with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            benign = root / "benign"
+            benign.mkdir()
+            for k in range(6):
+                # `.dll`, because a corpus directory is expanded by extension: a name that looks
+                # ordinary is not enough, and the first version of this test passed a `.bin` and got
+                # an empty corpus back -- which is exactly the refusal it was trying to avoid.
+                (benign / ("b%d.dll" % k)).write_bytes(b"MZ" + b"\x00" * 128 + b"kernel32.dll")
 
-            p = Path(t) / "s.exe"
+            p = root / "s.exe"
 
             p.write_bytes(build_pe() + b"http://evil-c2.top/gate http://evil-c2.top/gate")
 
-            r = tri.build_report(p, None)
+            r = tri.build_report(p, None, yara_corpus=[str(benign)])
 
         self.assertIn("UNREVIEWED", r["yara_draft"])
 

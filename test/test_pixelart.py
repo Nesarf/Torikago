@@ -17,9 +17,18 @@ pa = importlib.util.module_from_spec(spec)
 sys.modules["pixelart"] = pa
 spec.loader.exec_module(pa)
 
+# The sampler reads lossy sources, so it needs an image library. That is an extra, and a suite that
+# errors on its absence cannot run on a machine that is only checking the analysis.
+try:
+    import PIL                                                       # noqa: F401
+    HAVE_PILLOW = True
+except ImportError:
+    HAVE_PILLOW = False
+
+needs_pillow = unittest.skipUnless(HAVE_PILLOW, "pillow is the `window` extra and is not installed")
 
 
-
+@needs_pillow
 class TestSamplingMergesCompressionNoise(unittest.TestCase):
     """A lossy source does not contain palette entries; it contains each entry plus a halo.
 
