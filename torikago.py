@@ -42,6 +42,36 @@ import zlib
 from collections import Counter
 from pathlib import Path
 
+#: Everything the analyser itself imports, **declared so the capability boundary is an assertion rather
+#: than a paragraph.** The README says the analysis is offline, and a reader can reasonably take that for
+#: the whole repository -- it is not: sample fetching, the sample provider, posture reading and sample
+#: collection all reach the network or start a process. The boundary that matters is narrower and checkable:
+#: **this module imports no network and no subprocess**, so a target can never make it do either. A test
+#: compares this tuple against the file's real imports, so the claim cannot quietly rot.
+CORE_IMPORTS = (
+    "__future__", "argparse", "base64", "collections", "hashlib", "json", "math", "os",
+    "pathlib", "re", "shutil", "struct", "sys", "time", "uuid", "zlib",
+)
+
+#: The modules that mean "this code can reach outside the machine or start something". Listed by prefix
+#: rather than by exact name, because `urllib.error` and `urllib.request` are the same capability.
+NETWORK_OR_SHELL = ("urllib", "http", "socket", "ssl", "subprocess")
+
+#: The modules allowed to import them, at module level. **Written down rather than inferred**, because
+#: "which files may touch the network" is a decision about this tool, and a new one appearing here silently
+#: would be a change to its threat model. `sample_fetch` and `provider_malshare` fetch, `take_samples`
+#: collects, `security_posture` and `product_registration` read state through PowerShell.
+DELEGATED_TO_NETWORK_OR_SHELL = (
+    "sample_fetch.py", "provider_malshare.py", "security_posture.py", "product_registration.py",
+    "take_samples.py",
+)
+
+#: And the functions inside *this* file that start a process -- **measured, not assumed**: all three are on
+#: the `--handoff` path, where the sample is given to a real engine that decides. Everything else in this
+#: module, including the entire analysis path, imports neither at module level nor inside a function, so
+#: pointing it at a hostile file cannot make it call out. A test derives this set from the syntax tree.
+SHELL_CAPABLE_FUNCTIONS = ("defender_owner", "scan_with_defender", "scan_with_clamav")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import unpack as unpack_mod

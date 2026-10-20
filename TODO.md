@@ -331,7 +331,7 @@ venv (yara 4.5.4):      5 passed                ← 编译分支通过
 | # | 状态 | 项 | 为什么要紧 |
 |---|---|---|---|
 | **P1-1** | `[x]` | **`--handoff` 应能接受变体（`*_defanged.exe`）** | ~~修完之后没人能判定那个变体~~ **已做（1.19.0）**：目标集合现在含变体，且报告里如实标注它是修改过的副本 |
-| **P1-2** | `[ ]` | **Capability 边界写进架构，不只是文档** | 核心离线静态；采集/封存/posture 会联网会调 PowerShell。**审查指出：README 的"no network"容易被读成全仓库都不碰网** |
+| **P1-2** | `[x]` | **Capability 边界写进架构，不只是文档** | **已做**：边界现在是数据 —— `CORE_IMPORTS`（模块级 import 的完整名单）· `NETWORK_OR_SHELL`（什么算「能伸出去」）· `DELEGATED_TO_NETWORK_OR_SHELL`（五个允许的模块）· `SHELL_CAPABLE_FUNCTIONS`（本文件里允许启动进程的三个函数）。四条测试从语法树推出来比对，**双向**：declared 与 actual 任一侧多出东西都红。**而第一版断言是错的，测试当场说了出来**：我写的是「这个文件从不启动进程」，实测它有**三处** `import subprocess`（`defender_owner`／`scan_with_defender`／`scan_with_clamav`，全在 `--handoff` 那侧）—— 于是改的是**那句话**，不是测试。准确的说法因此是：**模块级 import 干净、全部分析路径干净，而 `--handoff` 会真的跑 `clamscan`，所以只有那三个函数例外。** 原描述：审查指出 README 的「no network」容易被读成全仓库都不碰网。 |
 
 ---
 
