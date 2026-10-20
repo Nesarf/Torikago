@@ -3644,6 +3644,20 @@ def main(argv=None) -> int:
         if skipped:
             print("skipped  : %s (the manifest does not measure itself)" % ", ".join(skipped))
         print("manifest : %s" % manifest_path)
+        # **A field that differs for a hash already in the manifest is reported, never absorbed.** The
+        # merge used to keep the newer value and say nothing, which made "the sample changed" and "the
+        # detector changed" the same event -- and those are the two things a corpus exists to separate.
+        # This cannot tell them apart either; what it can do is refuse to hide that the question exists.
+        if merged["changed"]:
+            print("changed  : %d field(s) differ from what this hash was measured as before"
+                  % len(merged["changed"]))
+            for item in merged["changed"][:5]:
+                print("    %s  %-18s %r -> %r" % (item["sha256"][:12], item["field"],
+                                                  item["was"], item["now"]))
+            if len(merged["changed"]) > 5:
+                print("    ... and %d more" % (len(merged["changed"]) - 5))
+            print("           the same hash with different measurements is either a changed sample or a")
+            print("           changed detector -- this line cannot tell you which, and neither can the file")
         print("  added   : %d" % len(merged["added"]))
         print("  updated : %d" % len(merged["updated"]))
         print("  total   : %d" % len(merged["entries"]))
