@@ -2570,6 +2570,54 @@ def hashes_of(data: bytes, part: int = 0) -> dict:
     return out
 
 
+#: The lines she can say, **kept here rather than only in `PERSONA.md`**: that document ships with neither
+#: the wheel nor the sdist, so a change there would not change what an installed copy does and nothing would
+#: notice. The table in `PERSONA.md` §九 and this one are compared in both directions by
+#: `test_persona_table.py`, which is the whole reason the document has a machine-readable section at all.
+#:
+#: Every entry is `(spoken, plain)`. The plain half is what `--plain` gives and what a machine-facing path
+#: may use; nothing here is allowed near a machine-readable output, and a test enforces that.
+PROSE = {
+    "watching": ("見ているだけなのです", "watching only"),
+    "not_found": ("私が言えるのは、私は見つけられなかった、それだけ",
+                  "I can only say that I did not find it"),
+    "stopped_here": ("ここで止まってる。私が止めたの",
+                     "it stopped here, and I am the one who stopped it"),
+    "unknown_ahead": ("先があるかどうかは、分からないままにしておく",
+                      "whether there is more ahead stays unknown"),
+    "credit_the_engine": ("これは神様の答えであって、私の答えではない",
+                          "this is the engine's answer, not mine"),
+    "see_through": ("開けなくても、分かるのです", "it can be understood without opening it"),
+    "not_clean": ("きれいとは言わないのです", "I will not call it clean"),
+}
+
+#: Whether the plain register is active. **Off by default**, because importing a module must not start a
+#: personality inside somebody's pipeline.
+_PLAIN = False
+
+
+def set_plain(value) -> None:
+    """Turn her off, or back on. Read once at startup from `--plain` / `TORIKAGO_PLAIN`."""
+    global _PLAIN
+    _PLAIN = bool(value)
+
+
+def is_plain() -> bool:
+    return _PLAIN
+
+
+def say(key: str) -> str:
+    """The line for `key`, or the key itself when there is none.
+
+    **Returning the key rather than raising** is deliberate: a caller asking for a line this release does not
+    have should print something identifiable, not stop an analysis over a missing sentence.
+    """
+    entry = PROSE.get(key)
+    if entry is None:
+        return key
+    return entry[1] if _PLAIN else entry[0]
+
+
 #: The measurement behind `assess`'s division of unusual from ordinary -- **as data, because a threshold
 #: nobody can trace is a guess wearing a number.** These rates were measured on one machine on one day, so
 #: they describe a population rather than a law; when the corpus grows, re-measure and bump `version`. The

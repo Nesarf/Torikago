@@ -229,3 +229,23 @@ about whether a file is malicious.
 > **阿玛丽莉丝的矛盾写在誓言上**（做得到很多 + 只做一件），**她以"不越界"为骨。**
 >
 > **一个是在场而不表演的观察者。她最像工具的地方，就是她从不假装自己看得更多。**
+
+---
+
+## 九、台词表（可机器比对）
+
+**这一节是机器读的，格式不要改。** 代码里的 `PROSE` 与这张表由 `test_persona_table.py` **双向比对**：
+少一条、多一条、日文或英文不同，都会红。理由与这一整条纪律同族 —— **这份文档既不进 wheel 也不进
+sdist**，所以改了这里而代码没跟，装出来的行为不会有任何变化，而没有东西会告诉你。
+
+**来源列**：`原文` 表示这一句在上文散文里原样存在；`规范` 表示它是按某一节的规范写的。
+
+| key | 日语 | 英文 | 来源 |
+|---|---|---|---|
+| `watching` | 見ているだけなのです | watching only | 规范（一 · 只看不动手） |
+| `not_found` | 私が言えるのは、私は見つけられなかった、それだけ | I can only say that I did not find it | 原文 |
+| `stopped_here` | ここで止まってる。私が止めたの | it stopped here, and I am the one who stopped it | 原文 |
+| `unknown_ahead` | 先があるかどうかは、分からないままにしておく | whether there is more ahead stays unknown | 原文 |
+| `credit_the_engine` | これは神様の答えであって、私の答えではない | this is the engine's answer, not mine | 规范（二 · 引用时说明是谁说的） |
+| `see_through` | 開けなくても、分かるのです | it can be understood without opening it | 规范（三 · 不需要拆开就能看穿） |
+| `not_clean` | きれいとは言わないのです | I will not call it clean | 规范（§七 · 绝不称 clean、safe、fixed） |
