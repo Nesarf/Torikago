@@ -1,0 +1,15 @@
+# What the sdist carries.
+#
+# **The test suite is shipped, so it has to be shippable.** The published 1.20.4 sdist held
+# `test/test_*.py` and nothing else from that directory: no `_fixtures.py`, so four modules failed at
+# import, and no `PERSONA.md` or `tools/pixelart.py`, so five more tests errored on a missing file.
+# Measured by unpacking the published sdist and running its suite on Linux: 391 tests, 7 errors.
+#
+# `tools/` is included because a test imports one of them, and because these scripts are how the numbers
+# in the documents were measured -- shipping the claim without the instrument is the shape this project
+# keeps correcting.
+include LICENSE
+include README.md
+include PERSONA.md
+recursive-include test *.py
+recursive-include tools *.py
