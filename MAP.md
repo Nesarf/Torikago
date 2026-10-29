@@ -67,3 +67,15 @@ python torikago.py --posture                      # 本机安全姿态
 ## 发布
 
 `pyproject.toml` 定义包；tag 触发 `.github/workflows/release.yml`，Trusted Publishing 到 PyPI，GitHub release 带发布记录。sdist 发布前解包并自跑测试。
+
+## 规模（测量值）
+
+```
+文件 125 · 代码行 24324 · 依赖边 21 · 测试文件 36 · 外部引用 46
+被最多模块引用的：torikago.py (4) · sample_fetch.py (3) · sample_vault.py (3)
+```
+
+测试文件数与代码文件数接近一比一，这是这四个工程里测试最密的一个。
+
+数字来自 `library_project op=map`（mega-index-map）对目录的静态清点。它数得出规模与依赖边，数不出职责与边界：
+前者在这一节，后者在上面的正文里。
