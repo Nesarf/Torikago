@@ -2308,6 +2308,69 @@ def quarantine_copy(source: Path, quarantine_dir: Path, report: dict, *,
     }
 
 
+def purge_staged(path: Path, confirmed_sha: str) -> int:
+    """Remove one staged copy, after checking that it is the file the caller meant.
+
+    **Deletion is the one action this tool takes that cannot be undone by reading the manifest.** Staging
+    records what was copied and why; this records what was destroyed, when, and by which hash -- so the
+    difference between "the shuttle is empty" and "the shuttle never had that file" stays visible.
+
+    The three refusals are all about the same thing: a path is a weak identity for something whose whole
+    purpose is to be dangerous. The manifest makes the directory a shuttle, and the hash makes the file the
+    one the caller looked at.
+    """
+    target = Path(path)
+    parent = target.parent
+    manifest = parent / QUARANTINE_MANIFEST
+    if not manifest.is_file():
+        print("REFUSED: %s is not a quarantine directory (no %s)" % (parent, QUARANTINE_MANIFEST))
+        return 2
+    if not target.is_file():
+        print("REFUSED: %s is not a file" % target)
+        return 2
+    if not confirmed_sha or len(confirmed_sha) != 64 or any(c not in "0123456789abcdefABCDEF"
+                                                           for c in confirmed_sha):
+        print("REFUSED: --purge-confirm wants the sha256 of the file to remove; a path alone is not "
+              "identity enough for a delete")
+        return 2
+
+    digest = hashlib.sha256()
+    try:
+        with target.open("rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(block)
+    except OSError as exc:
+        print("REFUSED: could not read %s: %s" % (target, exc))
+        return 2
+    actual = digest.hexdigest()
+    if actual.lower() != confirmed_sha.lower():
+        print("REFUSED: %s hashes to %s, not to the confirmed %s" % (target, actual[:16], confirmed_sha[:16]))
+        return 2
+
+    size = target.stat().st_size
+    try:
+        target.unlink()
+    except OSError as exc:
+        print("REFUSED: could not remove %s: %s" % (target, exc))
+        return 2
+
+    record = {
+        "purged_at": time.strftime("%Y%m%dT%H%M%S"),
+        "staged_name": target.name,
+        "sha256": actual,
+        "bytes": size,
+        "note": "the copy was removed; the original, if it still exists, was not touched",
+    }
+    with manifest.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    print("removed %s (%d bytes)" % (target.name, size))
+    print("  sha256 %s" % actual)
+    print("  recorded in %s" % manifest)
+    print("  the original was not touched")
+    return 0
+
+
 def list_quarantine(quarantine_dir: Path) -> int:
     """Show what is waiting in a shuttle directory, so it does not become a black hole."""
     manifest = quarantine_dir / QUARANTINE_MANIFEST
@@ -3464,6 +3527,11 @@ def main(argv=None) -> int:
                          "defaults to the system directories, or pass an empty value to refuse "
                          "the draft when no corpus is readable). A rule whose strings also occur "
                          "in ordinary files matches nothing useful, and this is what says so.")
+    ap.add_argument("--purge", metavar="PATH",
+                    help="remove one staged copy from a quarantine directory; requires --purge-confirm "
+                         "with its sha256. The original is never touched")
+    ap.add_argument("--purge-confirm", metavar="SHA256",
+                    help="the sha256 the file must have before it is removed")
     ap.add_argument("--quarantine", metavar="DIR",
                     help="stage a flagged file into this directory for VM analysis "
                          "(a copy plus a written reason; never executes anything)")
@@ -3596,6 +3664,8 @@ def main(argv=None) -> int:
             print("  - %s" % caveat)
         return 0
 
+    if args.purge:
+        return purge_staged(Path(args.purge), args.purge_confirm or "")
     if args.quarantine_list:
         return list_quarantine(Path(args.quarantine_list))
 
