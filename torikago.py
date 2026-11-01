@@ -143,7 +143,7 @@ def _version() -> str:
 
 
 # Kept only for the by-path case. When the package is installed this value is not used.
-_SOURCE_VERSION = "1.20.5"
+_SOURCE_VERSION = "1.21.0"
 VERSION = _version()
 
 # --------------------------------------------------------------------------- #
