@@ -470,6 +470,22 @@ string"**, so a keyword hit cannot decide anything on its own.
 | a recognised wrapper | yes: it is a self-extracting program |
 | nothing flagged | no — `nothing flagged above the staging threshold (weak signals: N)` |
 
+### Removing a staged copy — `--purge`
+
+```bash
+python torikago.py --purge shuttle/20260101T000000_abc123_sample.exe --purge-confirm <sha256>
+```
+
+Staging hands the sample to a VM and leaves it there. `--purge` is the other ending, and it refuses in three
+places because the failure mode of a delete is a missing answer rather than a wrong one: the file must sit in a
+directory that already holds `quarantine.jsonl`, so a path named from memory removes nothing; the caller must
+paste the sha256 it expects, so a stale path does not delete a neighbour; and nothing outside a shuttle is ever
+removed, so the original stays where the operator can see it.
+
+Each purge appends when, which name, which hash, how many bytes — and the sentence that matters afterwards:
+the original was not touched. Without it, an empty shuttle and a shuttle that never held that file look the
+same.
+
 ## Hardened as an attack surface, not only used as a tool
 
 A tool that opens untrusted files is itself an attack surface, so it was audited as one.
