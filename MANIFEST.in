@@ -8,8 +8,14 @@
 # `tools/` is included because a test imports one of them, and because these scripts are how the numbers
 # in the documents were measured -- shipping the claim without the instrument is the shape this project
 # keeps correcting.
+#
+# `FORMAT_MATRIX.md` is included because `test/test_format_matrix.py` reads it: the document is the
+# assertion's input, not a comment beside it. Leaving it out of the sdist would turn every format test
+# into a missing-file error, which is exactly the shape of the 1.20.4 defect above -- a shipped suite
+# that cannot run because a file it needs was not shipped.
 include LICENSE
 include README.md
 include PERSONA.md
+include FORMAT_MATRIX.md
 recursive-include test *.py
 recursive-include tools *.py
