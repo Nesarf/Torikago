@@ -497,10 +497,16 @@ Nanodesu 的矩阵 examined 到 `6.22.3`。**上游发新版本时没有任何�
 - 把表里 D 盘那一行删掉 → **一条红**：`test_the_workspace_is_refused_by_both_of_its_names`，
   报错原话是 `D:\~Sayori~Sleeping~\samples was allowed`。其余 13 条不动。
 
-**一处没有证到的地方照实说**：`os.symlink` 需要开发者模式权限，所以这台机器之外的机器会 skip
-（skip 时会说出原因，不是静默通过）。而这条测试用的是 symlink 而不是 junction —— 两者在
-`resolve()` 上行为相同，但**建 junction 那条路没有测试覆盖**（`mklink /J` 需要子进程，
-而这台机器的 `subprocess` 抓输出会撞句柄错误，见第一次尝试）。
+**一处原以为没证到、后来在 CI 上证到的地方**：`os.symlink` 要创建符号链接的权限，我原以为
+GitHub 的 Windows runner 会因此跳过这四条 —— 实测**没有**。`windows-latest` 的日志里四条全是 `ok`
+（`test_a_root_named_by_the_resolved_path_only`、`..._written_path_only`、`..._two_names_are_different`、
+以及 `..._both_of_its_names` 的两个 subtest 各 `ok`），所以这条路在真跑，不是本机的一次性绿。
+Linux 上按 `skipUnless(os.name == "nt")` 跳过，那是有意的 —— 禁区表是 Windows 路径，
+在别的平台上断言它要么空洞通过、要么测的不是发出去的那份。
+
+**还有一点没有覆盖，照实写**：这条测试建的是 symlink，不是 junction，两者在 `resolve()` 上
+行为相同，但**建 junction 那条路没有测试**（`mklink /J` 要子进程，而本机的 `subprocess` 抓输出
+会撞句柄错误 —— 见第一次尝试的失败记录）。要覆盖它得先解决那个句柄问题，而它不属于这一条。
 
 # 一、第一档：正确性与管道
 
