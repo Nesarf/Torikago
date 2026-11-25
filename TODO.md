@@ -504,9 +504,13 @@ GitHub 的 Windows runner 会因此跳过这四条 —— 实测**没有**。`wi
 Linux 上按 `skipUnless(os.name == "nt")` 跳过，那是有意的 —— 禁区表是 Windows 路径，
 在别的平台上断言它要么空洞通过、要么测的不是发出去的那份。
 
-**还有一点没有覆盖，照实写**：这条测试建的是 symlink，不是 junction，两者在 `resolve()` 上
-行为相同，但**建 junction 那条路没有测试**（`mklink /J` 要子进程，而本机的 `subprocess` 抓输出
-会撞句柄错误 —— 见第一次尝试的失败记录）。要覆盖它得先解决那个句柄问题，而它不属于这一条。
+**还有一点没有覆盖，照实写**：这条测试建的是 symlink，不是 junction —— 两者在 `resolve()` 上
+行为相同，但 junction 那条路没有测试。**本机试过：`mklink /J` 两种写法都建成功了，`resolve()`
+结果也正确**，所以它并非做不到；失败的是抓它输出的那两次（pytest 里报 `WinError 6` 句柄无效，
+独立脚本里报 `UnicodeDecodeError` —— cmd 的输出是 GBK，被当成 UTF-8 解码）。
+改用 symlink 的真实理由是它不创建进程、不经过管道，而不是 junction 建不出来。
+**这条区别值得写下来**：「换个方法做同一件事」与「那件事做不成」在草稿上会变成同一句话，
+而只有前一句是真的。
 
 # 一、第一档：正确性与管道
 
