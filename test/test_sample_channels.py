@@ -116,6 +116,109 @@ class TestRefusalsComeBeforeAnyNetworkCall(unittest.TestCase):
         self.assertIn("suggestion, not an assumption", flat)
 
 
+@unittest.skipUnless(os.name == "nt",
+                     "the forbidden roots are Windows paths, so the rule only means something here")
+class TestALinkIsNotAWayOut(unittest.TestCase):
+    """Two names for one place, and both get checked.
+
+    This class exists because a test failed. On this machine `E:\\~Sayori~Sleeping~` is a junction
+    onto `D:\\~Sayori~Sleeping~`, so a destination written inside the workspace resolved to a path
+    the forbidden table did not name -- and the fetch was allowed through a door the rule had
+    closed. The fixture builds its own junction rather than relying on that one, because the
+    machine's layout is not the rule.
+
+    **The two refusal assertions below are deliberately one-sided**, and that is the point of
+    having two:
+
+    * `test_a_root_named_by_the_resolved_path_only` can only be satisfied by checking the resolved
+      name -- the written name does not mention that root.
+    * `test_a_root_named_by_the_written_path_only` can only be satisfied by checking the written
+      name -- resolving leads away from that root.
+
+    Remove either half of the fix and exactly one of them goes red, which is how a guard is shown
+    to be load-bearing rather than present.
+    """
+
+    def setUp(self):
+        self.base = tmpdir()                        # skips, saying why, with no allowed location
+        self.real = self.base / "real"
+        self.real.mkdir()
+        self.link = self.base / "link"
+        # `os.symlink` rather than `mklink /J`: no child process, no pipe to read, and a symlink
+        # resolves exactly like a junction does for the purpose of this test. It needs the
+        # developer-mode privilege, which is why the failure below skips with the reason instead of
+        # passing quietly -- a host that cannot make a link cannot test this rule.
+        try:
+            os.symlink(str(self.real), str(self.link), target_is_directory=True)
+        except OSError as exc:
+            self.skipTest("no directory link could be created here: %s" % exc)
+        self.addCleanup(self._remove)
+
+    def _remove(self):
+        """Remove the link itself first.
+
+        `shutil.rmtree` does not treat a directory link as a link, so handing it the parent would
+        follow this one and delete whatever it points at. `os.unlink` removes the link and leaves
+        the target alone, in that order.
+        """
+        try:
+            os.unlink(str(self.link))
+        except OSError:
+            pass
+        __import__("shutil").rmtree(self.base, ignore_errors=True)
+
+    def _refused_by(self, root):
+        """Check one destination against exactly one forbidden root; return the message or None."""
+        original = sf.FORBIDDEN_ROOTS
+        sf.FORBIDDEN_ROOTS = (str(root),)
+        try:
+            sf.check_destination(self.link / "samples")
+        except SystemExit as exc:
+            return str(exc)
+        finally:
+            sf.FORBIDDEN_ROOTS = original
+        return None
+
+    def test_the_two_names_are_different(self):
+        names = sf.destination_names(self.link / "samples")
+        self.assertEqual(len(names), 2, [str(n) for n in names])
+        self.assertNotEqual(str(names[0]).lower(), str(names[1]).lower(),
+                            "a junction that does not change the name cannot test anything")
+
+    def test_a_root_named_by_the_resolved_path_only(self):
+        message = self._refused_by(self.real)
+        self.assertIsNotNone(message, "the resolved name was not compared against the table")
+        self.assertIn(str(self.real).lower(), message.lower())
+
+    def test_a_root_named_by_the_written_path_only(self):
+        message = self._refused_by(self.link)
+        self.assertIsNotNone(message, "the name as written was not compared against the table")
+        self.assertIn(str(self.link).lower(), message.lower())
+
+    def test_the_message_names_the_workspace_the_user_typed(self):
+        """Not the resolved path: the reader typed `E:`, and a message about `D:` reads as a bug."""
+        try:
+            sf.check_destination(Path(r"E:\~Sayori~Sleeping~\samples"))
+        except SystemExit as exc:
+            self.assertIn(r"E:\~Sayori~Sleeping~", str(exc))
+        else:
+            self.fail("a destination inside the workspace was allowed")
+
+    def test_the_workspace_is_refused_by_both_of_its_names(self):
+        """One workspace, two names on this machine, and the table has to carry both.
+
+        Checking both names only helps someone who arrives by the name the table knows. A stranger
+        who writes the other name of the same directory meets neither check unless that name is in
+        the table too -- so this asserts both spellings, and goes red when either line is dropped.
+        """
+        for written in (r"E:\~Sayori~Sleeping~\samples", r"D:\~Sayori~Sleeping~\samples"):
+            with self.subTest(written=written):
+                if not Path(written).parents[0].is_dir():
+                    self.skipTest("this machine has no %s" % written)
+                with self.assertRaises(SystemExit, msg="%s was allowed" % written):
+                    sf.check_destination(Path(written))
+
+
 class TestEachFailureSaysWhichFailureItWas(unittest.TestCase):
     """Conflating them sends the reader the wrong way, which happened."""
 

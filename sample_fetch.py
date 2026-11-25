@@ -45,8 +45,14 @@ except ImportError:                                    # pragma: no cover - repo
 # declares ten gigabytes still writes ten gigabytes.
 MAX_DOWNLOAD_BYTES = 512 << 20
 
+# Named by both of its names on this machine: `E:\~Sayori~Sleeping~` is a junction onto
+# `D:\~Sayori~Sleeping~`, so a check that resolves the destination and then compares strings sees
+# `D:\...` for something the user wrote as `E:\...` and lets it through. The pair is here because
+# the layout is, not because the tool should know any machine's drives -- whoever moves the
+# workspace adds a line, and `test_destination_names` fails the moment the two lists drift.
 FORBIDDEN_ROOTS = (
     r"E:\~Sayori~Sleeping~",     # the workspace: everything here ends up in a repository
+    r"D:\~Sayori~Sleeping~",     # the same directory, which E: reaches through a junction
     r"E:\DaShaoHuo",             # downloads and caches, not samples
     "C:\\",                      # system drive: never, whatever the reason
 )
@@ -90,29 +96,53 @@ def protection_state() -> dict:
     return state
 
 
+def destination_names(dest: Path) -> list:
+    """The destination under every name it can be reached by: as written, and with links resolved.
+
+    Both are checked, and the pair is the whole point. `Path.resolve()` answers a different
+    question than the one this refusal asks: it says where a name leads, while the refusal is about
+    where the bytes land. A junction makes those two different strings for one place --
+    `E:\\~Sayori~Sleeping~` is written by the user and `D:\\~Sayori~Sleeping~` is what resolve()
+    returns for it -- so checking only the resolved form lets a destination that was named inside
+    the workspace through, which is exactly what this function exists to prevent.
+
+    The as-written name comes first: it is the one the user typed, and it belongs in the message.
+    """
+    given = Path(dest)
+    try:
+        resolved = Path(str(given.resolve()))
+    except OSError:
+        # A name that cannot be resolved is still a name; the literal check below still applies.
+        return [given]
+    return [given] if resolved == given else [given, resolved]
+
+
 def check_destination(dest: Path) -> None:
     """Refuse destinations where a sample would become somebody's problem later.
 
     Every check exists because of a specific way this goes wrong: a sample inside a git repository is
     committed eventually; a sample on the system drive survives a machine being handed on; a sample in
     a downloads folder gets opened by a person who forgot what it was.
+
+    Both checks run against every name in `destination_names`, because a link is not a way out of
+    any of them: a repository reached through a junction is still that repository.
     """
-    resolved = str(Path(dest).resolve())
-    for root in FORBIDDEN_ROOTS:
-        if resolved.lower().startswith(root.lower()):
-            raise SystemExit(
-                "refusing to write samples under %s\n"
-                "  (%s)\n"
-                "  pick a quarantine directory outside the workspace, the cache area and C:" % (
-                    root, resolved))
-    # A repository anywhere above the destination means the sample can be committed by accident.
-    probe = Path(resolved)
-    for parent in [probe] + list(probe.parents):
-        if (parent / ".git").exists():
-            raise SystemExit(
-                "refusing to write samples inside a git repository\n"
-                "  (%s is a repository)\n"
-                "  a sample in a repository gets committed eventually" % parent)
+    for probe in destination_names(dest):
+        resolved = str(probe)
+        for root in FORBIDDEN_ROOTS:
+            if resolved.lower().startswith(root.lower()):
+                raise SystemExit(
+                    "refusing to write samples under %s\n"
+                    "  (%s)\n"
+                    "  pick a quarantine directory outside the workspace, the cache area and C:" % (
+                        root, resolved))
+        # A repository anywhere above the destination means the sample can be committed by accident.
+        for parent in [probe] + list(probe.parents):
+            if (parent / ".git").exists():
+                raise SystemExit(
+                    "refusing to write samples inside a git repository\n"
+                    "  (%s is a repository)\n"
+                    "  a sample in a repository gets committed eventually" % parent)
 
 
 def classify_hash(value: str) -> str:
